@@ -168,7 +168,8 @@ def cmd_status(args):
 
 
 def cmd_export(args):
-    """Export latest RS ratings to CSV."""
+    """Export latest RS ratings to CSV files."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.get_connection()
     latest_date = db.get_latest_rs_date(conn)
     if not latest_date:
@@ -177,9 +178,17 @@ def cmd_export(args):
         return
 
     df = db.get_rs_for_export(conn, latest_date)
+
+    # Export dated file
     outpath = DATA_DIR / f"rs_ratings_{latest_date}.csv"
     df.to_csv(outpath, index=False)
     print(f"Exported {len(df)} records to {outpath}")
+
+    # Export tickers.csv (always overwrite, tracked by git)
+    tickers_path = DATA_DIR / "tickers.csv"
+    df.to_csv(tickers_path, index=False)
+    print(f"Updated {tickers_path} ({len(df)} tickers)")
+
     conn.close()
 
 

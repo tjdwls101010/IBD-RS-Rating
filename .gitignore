@@ -5,7 +5,8 @@ dist/
 build/
 .venv/
 data/rs.db
-data/*.csv
+data/rs_ratings_*.csv
+!data/tickers.csv
 .DS_Store
 .env
 supabase/.temp/

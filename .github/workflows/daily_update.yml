@@ -26,7 +26,20 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m ibd_rs update
 
+      - name: Export tickers CSV
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m ibd_rs export
+
       - name: Print status
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m ibd_rs status
+
+      - name: Commit updated tickers.csv
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/tickers.csv
+          git diff --cached --quiet || git commit -m "Update tickers.csv $(date +%Y-%m-%d)"
+          git push
