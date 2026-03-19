@@ -9,3 +9,4 @@ data/*.csv
 .DS_Store
 .env
 supabase/.temp/
+References/
