@@ -99,6 +99,14 @@ rs.dates()
 
 ---
 
+## Available Stocks
+
+**4,600+ US-listed stocks** are tracked and updated daily. See the full list with current RS ratings:
+
+**[`data/tickers.csv`](data/tickers.csv)**
+
+---
+
 ## API Reference
 
 ### `RS(url=None, key=None)`
