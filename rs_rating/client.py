@@ -217,6 +217,87 @@ class RS:
         }
         return self._request("rs", params)
 
+    def movers(self, days=5, n=20, direction="up"):
+        """Get stocks with the biggest RS Rating change over recent days.
+
+        Args:
+            days: Lookback period in trading days (default 5).
+            n: Number of results (default 20).
+            direction: ``"up"`` for biggest gainers, ``"down"`` for biggest losers.
+
+        Returns:
+            A *list* of dicts with ``ticker``, ``rs_rating``, ``prev_rating``,
+            ``change``, sorted by change magnitude.
+        """
+        # Get all ratings for latest date
+        today = self._latest_date()
+        if not today:
+            return []
+
+        current = self._request("rs", {
+            "select": "ticker,rs_rating",
+            "date": f"eq.{today}",
+            "rs_rating": "not.is.null",
+        })
+
+        # Get all available dates to find the date N trading days ago
+        dates = self._request("rs", {
+            "select": "date",
+            "date": f"lte.{today}",
+            "rs_rating": "not.is.null",
+            "order": "date.desc",
+            "limit": str(days + 1),
+        })
+        if len(dates) < 2:
+            return []
+        prev_date = dates[-1]["date"]
+
+        previous = self._request("rs", {
+            "select": "ticker,rs_rating",
+            "date": f"eq.{prev_date}",
+            "rs_rating": "not.is.null",
+        })
+
+        # Build lookup and compute changes
+        prev_map = {r["ticker"]: r["rs_rating"] for r in previous}
+        results = []
+        for r in current:
+            ticker = r["ticker"]
+            if ticker in prev_map:
+                change = r["rs_rating"] - prev_map[ticker]
+                results.append({
+                    "ticker": ticker,
+                    "rs_rating": r["rs_rating"],
+                    "prev_rating": prev_map[ticker],
+                    "change": change,
+                })
+
+        reverse = direction.lower() != "down"
+        results.sort(key=lambda x: x["change"], reverse=reverse)
+        return results[:n]
+
+    def dates(self):
+        """Get the available date range for RS data.
+
+        Returns:
+            A *dict* with ``first`` (earliest date), ``last`` (latest date).
+        """
+        first = self._request("rs", {
+            "select": "date",
+            "rs_rating": "not.is.null",
+            "order": "date.asc",
+            "limit": "1",
+        })
+        last = self._request("rs", {
+            "select": "date",
+            "rs_rating": "not.is.null",
+            "order": "date.desc",
+            "limit": "1",
+        })
+        if not first or not last:
+            return {"first": None, "last": None}
+        return {"first": first[0]["date"], "last": last[0]["date"]}
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

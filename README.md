@@ -84,6 +84,17 @@ rs.filter(min_rating=90)
 # SPY & QQQ benchmark RS (raw score, not ranked)
 rs.reference()
 # [{'ticker': 'SPY', 'rs_raw': 0.049}, {'ticker': 'QQQ', 'rs_raw': 0.063}]
+
+# Stocks with biggest RS Rating improvement (last 5 trading days)
+rs.movers(days=5, n=10)
+# [{'ticker': 'XYZ', 'rs_rating': 85, 'prev_rating': 60, 'change': 25}, ...]
+
+# Biggest RS losers
+rs.movers(days=5, n=10, direction="down")
+
+# Available date range
+rs.dates()
+# {'first': '2025-03-21', 'last': '2026-03-19'}
 ```
 
 ---
@@ -142,6 +153,30 @@ rs.compare(["AAPL", "MSFT", "GOOG", "AMZN", "META"])
 ### `.reference(date=None) → list`
 
 Get RS raw scores for benchmark indices (SPY, QQQ). These are not percentile-ranked — they provide a baseline to compare individual stocks against the market.
+
+### `.movers(days=5, n=20, direction="up") → list`
+
+Get stocks with the biggest RS Rating change over recent trading days. Perfect for finding emerging momentum leaders.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `days` | int | Lookback period in trading days (default: 5) |
+| `n` | int | Number of results (default: 20) |
+| `direction` | str | `"up"` for gainers, `"down"` for losers |
+
+```python
+rs.movers(days=5, n=10, direction="up")
+# [{'ticker': 'XYZ', 'rs_rating': 85, 'prev_rating': 60, 'change': 25}, ...]
+```
+
+### `.dates() → dict`
+
+Get the available date range for RS data.
+
+```python
+rs.dates()
+# {'first': '2025-03-21', 'last': '2026-03-19'}
+```
 
 ---
 

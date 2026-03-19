@@ -242,6 +242,82 @@ def test_top_empty_database(mock_urlopen):
     assert result == []
 
 
+@patch("urllib.request.urlopen")
+def test_movers_up(mock_urlopen):
+    mock_urlopen.side_effect = [
+        # _latest_date
+        mock_response([{"date": "2026-03-19"}]),
+        # current ratings
+        mock_response([
+            {"ticker": "NVDA", "rs_rating": 70},
+            {"ticker": "AAPL", "rs_rating": 80},
+            {"ticker": "TSLA", "rs_rating": 50},
+        ]),
+        # dates lookup (5 days back)
+        mock_response([
+            {"date": "2026-03-19"}, {"date": "2026-03-18"},
+            {"date": "2026-03-17"}, {"date": "2026-03-14"},
+            {"date": "2026-03-13"}, {"date": "2026-03-12"},
+        ]),
+        # previous ratings
+        mock_response([
+            {"ticker": "NVDA", "rs_rating": 60},
+            {"ticker": "AAPL", "rs_rating": 82},
+            {"ticker": "TSLA", "rs_rating": 55},
+        ]),
+    ]
+    rs = RS()
+    result = rs.movers(days=5, n=2, direction="up")
+    assert len(result) == 2
+    assert result[0]["ticker"] == "NVDA"  # +10, biggest gainer
+    assert result[0]["change"] == 10
+
+
+@patch("urllib.request.urlopen")
+def test_movers_down(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-03-19"}]),
+        mock_response([
+            {"ticker": "NVDA", "rs_rating": 70},
+            {"ticker": "TSLA", "rs_rating": 50},
+        ]),
+        mock_response([
+            {"date": "2026-03-19"}, {"date": "2026-03-12"},
+        ]),
+        mock_response([
+            {"ticker": "NVDA", "rs_rating": 60},
+            {"ticker": "TSLA", "rs_rating": 55},
+        ]),
+    ]
+    rs = RS()
+    result = rs.movers(days=5, n=2, direction="down")
+    assert result[0]["change"] == -5  # TSLA dropped most
+
+
+@patch("urllib.request.urlopen")
+def test_dates(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2025-03-21"}]),
+        mock_response([{"date": "2026-03-19"}]),
+    ]
+    rs = RS()
+    result = rs.dates()
+    assert result["first"] == "2025-03-21"
+    assert result["last"] == "2026-03-19"
+
+
+@patch("urllib.request.urlopen")
+def test_dates_empty(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([]),
+        mock_response([]),
+    ]
+    rs = RS()
+    result = rs.dates()
+    assert result["first"] is None
+    assert result["last"] is None
+
+
 def test_version():
     import rs_rating
     assert rs_rating.__version__ == "0.1.0"
