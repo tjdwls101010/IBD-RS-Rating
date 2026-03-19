@@ -1,20 +1,37 @@
 [project]
 name = "ibd-rs-rating"
 version = "0.1.0"
-description = "IBD-style Relative Strength Rating calculator"
+description = "Unofficial IBD-style Relative Strength Rating for 4,600+ US stocks"
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
-dependencies = [
+dependencies = []  # zero dependencies for API client (rs_rating)
+keywords = ["stocks", "momentum", "relative-strength", "ibd", "investing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+[project.urls]
+Homepage = "https://github.com/tjdwls101010/IBD-RS-Rating"
+Repository = "https://github.com/tjdwls101010/IBD-RS-Rating"
+
+[project.optional-dependencies]
+engine = [
     "pandas>=2.0",
     "yfinance>=0.2.30",
     "finviz>=2.0",
 ]
-
-[project.optional-dependencies]
 pg = [
     "psycopg2-binary>=2.9",
 ]
 dev = [
     "pytest>=7.0",
+    "build",
+    "twine",
 ]
 
 [project.scripts]
