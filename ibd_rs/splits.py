@@ -19,10 +19,15 @@ def detect_anomalous_changes(conn, threshold=None):
     """
     threshold = threshold or SPLIT_THRESHOLD
 
-    # Get the last 5 trading days of data
-    query = """
+    # Backend-aware date expression
+    if db._conn_is_pg(conn):
+        date_expr = "(MAX(date)::date - INTERVAL '7 days')::text"
+    else:
+        date_expr = "date(MAX(date), '-7 days')"
+
+    query = f"""
         SELECT ticker, date, close FROM price
-        WHERE date >= (SELECT date(MAX(date), '-7 days') FROM price)
+        WHERE date >= (SELECT {date_expr} FROM price)
         ORDER BY ticker, date
     """
     df = pd.read_sql_query(query, conn)
@@ -69,13 +74,11 @@ def verify_and_repair(conn, flagged_tickers):
                 logger.debug("%s: no split history, likely genuine price move", ticker)
                 continue
 
-            # Check for recent splits
             recent = splits[splits.index >= pd.Timestamp(cutoff, tz=splits.index.tz)]
             if recent.empty:
                 logger.debug("%s: no recent splits, likely genuine price move", ticker)
                 continue
 
-            # Split confirmed — re-download full history
             logger.info("%s: split detected (ratio: %s), re-downloading...",
                         ticker, recent.values.tolist())
 
@@ -84,10 +87,9 @@ def verify_and_repair(conn, flagged_tickers):
                 logger.warning("%s: re-download returned no data", ticker)
                 continue
 
-            # Delete old data for this ticker
-            conn.execute("DELETE FROM price WHERE ticker = ?", (ticker,))
+            # Delete old data and insert fresh adjusted data
+            db.delete_ticker_prices(conn, ticker)
 
-            # Insert fresh adjusted data
             if isinstance(data.columns, pd.MultiIndex):
                 close = data["Close"].iloc[:, 0]
             else:

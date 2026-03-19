@@ -1,6 +1,11 @@
 """Configuration constants."""
 
+import os
 from pathlib import Path
+
+# Database backend: set DATABASE_URL env var for PostgreSQL (Supabase)
+# If not set, falls back to local SQLite
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent

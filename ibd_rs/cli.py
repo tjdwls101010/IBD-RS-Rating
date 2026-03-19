@@ -2,7 +2,6 @@
 
 import argparse
 import logging
-import sys
 
 from .config import DATA_DIR
 from . import db
@@ -27,20 +26,16 @@ def cmd_init(args):
     conn = db.get_connection()
     db.init_db(conn)
 
-    # Step 1: Fetch ticker list
     print("Step 1/4: Fetching ticker list from Finviz...")
-    ticker_list = tickers_mod.fetch_ticker_list()
+    ticker_list = tickers_mod.fetch_ticker_list(conn, force_refresh=True)
     print(f"  Found {len(ticker_list)} tickers")
-    db.set_meta(conn, "ticker_count", str(len(ticker_list)))
 
-    # Step 2: Download price history
     print(f"Step 2/4: Downloading 2-year price history ({len(ticker_list)} tickers)...")
     print("  This may take 20-30 minutes.")
     failed = prices.download_initial(ticker_list, conn)
     if failed:
         print(f"  Warning: {len(failed)} tickers failed to download")
 
-    # Step 3: Check for splits
     print("Step 3/4: Checking for stock splits...")
     flagged = splits.detect_anomalous_changes(conn)
     if flagged:
@@ -49,14 +44,11 @@ def cmd_init(args):
     else:
         print("  No anomalies detected")
 
-    # Step 4: Calculate RS ratings
     print("Step 4/4: Calculating RS ratings...")
     count = rs.calculate_and_store(conn, recalc_all=True)
     print(f"  Computed {count} RS records")
 
-    # Prune old prices
     db.prune_old_prices(conn)
-
     conn.close()
     print("\nInit complete!")
     cmd_status(args)
@@ -67,18 +59,15 @@ def cmd_update(args):
     conn = db.get_connection()
     db.init_db(conn)
 
-    # Step 1: Fetch ticker list (or reuse)
     print("Step 1/4: Fetching ticker list...")
-    ticker_list = tickers_mod.fetch_ticker_list()
+    ticker_list = tickers_mod.fetch_ticker_list(conn)  # uses cache if fresh
     print(f"  {len(ticker_list)} tickers")
 
-    # Step 2: Download new prices
     print("Step 2/4: Downloading new price data...")
     failed = prices.download_update(ticker_list, conn)
     if failed:
         print(f"  Warning: {len(failed)} tickers failed")
 
-    # Step 3: Check splits
     print("Step 3/4: Checking for stock splits...")
     flagged = splits.detect_anomalous_changes(conn)
     if flagged:
@@ -87,7 +76,6 @@ def cmd_update(args):
     else:
         print("  No anomalies detected")
 
-    # Step 4: Calculate RS
     print("Step 4/4: Calculating RS ratings...")
     count = rs.calculate_and_store(conn, recalc_all=False)
     print(f"  Computed {count} RS records")
@@ -116,18 +104,8 @@ def cmd_top(args):
         return
 
     n = args.n or 20
-    query = """
-        SELECT r.ticker, r.rs_rating, r.rs_raw
-        FROM rs r
-        WHERE r.date = ? AND r.rs_rating IS NOT NULL
-        ORDER BY r.rs_rating DESC, r.rs_raw DESC
-        LIMIT ?
-    """
-    rows = conn.execute(query, (latest_date, n)).fetchall()
-
-    # Get reference tickers
-    ref_query = "SELECT ticker, rs_raw FROM rs WHERE date = ? AND rs_rating IS NULL"
-    refs = conn.execute(ref_query, (latest_date,)).fetchall()
+    rows = db.get_top_rs(conn, latest_date, n)
+    refs = db.get_reference_rs(conn, latest_date)
 
     print(f"\nIBD RS Ratings — {latest_date}")
     print("=" * 50)
@@ -149,14 +127,7 @@ def cmd_lookup(args):
     """Show RS history for a specific ticker."""
     conn = db.get_connection()
     days = args.days or 30
-    query = """
-        SELECT date, rs_raw, rs_rating
-        FROM rs
-        WHERE ticker = ?
-        ORDER BY date DESC
-        LIMIT ?
-    """
-    rows = conn.execute(query, (args.ticker.upper(), days)).fetchall()
+    rows = db.get_rs_history(conn, args.ticker.upper(), days)
 
     if not rows:
         print(f"No RS data found for {args.ticker.upper()}")
@@ -205,14 +176,7 @@ def cmd_export(args):
         conn.close()
         return
 
-    query = """
-        SELECT ticker, date, rs_raw, rs_rating
-        FROM rs WHERE date = ?
-        ORDER BY rs_rating DESC NULLS LAST
-    """
-    import pandas as pd
-    df = pd.read_sql_query(query, conn, params=(latest_date,))
-
+    df = db.get_rs_for_export(conn, latest_date)
     outpath = DATA_DIR / f"rs_ratings_{latest_date}.csv"
     df.to_csv(outpath, index=False)
     print(f"Exported {len(df)} records to {outpath}")

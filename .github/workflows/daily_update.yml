@@ -1,0 +1,32 @@
+name: Daily RS Update
+
+on:
+  schedule:
+    - cron: '0 21 * * 1-5'  # UTC 21:00 (US market close + 1hr), weekdays
+  workflow_dispatch:  # allow manual trigger
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install ".[pg]"
+
+      - name: Run daily update
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m ibd_rs update
+
+      - name: Print status
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m ibd_rs status

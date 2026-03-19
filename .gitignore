@@ -7,3 +7,5 @@ build/
 data/rs.db
 data/*.csv
 .DS_Store
+.env
+supabase/.temp/

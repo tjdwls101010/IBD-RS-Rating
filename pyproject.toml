@@ -10,6 +10,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+pg = [
+    "psycopg2-binary>=2.9",
+]
 dev = [
     "pytest>=7.0",
 ]
@@ -18,7 +21,7 @@ dev = [
 ibd-rs = "ibd_rs.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["ibd_rs*"]
+include = ["ibd_rs*", "rs_rating*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
