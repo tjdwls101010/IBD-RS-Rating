@@ -98,6 +98,11 @@ rs.movers(days=5, n=10, direction="down")
 # Available date range
 rs.dates()
 # {'first': '2025-03-21', 'last': '2026-03-19'}
+
+# Sector & Industry analysis
+rs.sector_ranking()                    # Which sectors are strongest?
+rs.industry_top("Semiconductors", 5)   # Top 5 semiconductor stocks
+rs.sector_top("Energy", 10)            # Top 10 energy stocks
 ```
 
 ---
@@ -187,6 +192,55 @@ Get the available date range for RS data.
 ```python
 rs.dates()
 # {'first': '2025-03-21', 'last': '2026-03-19'}
+```
+
+### `.sectors() → list`
+
+List all available sectors.
+
+### `.industries(sector=None) → list`
+
+List all available industries, optionally filtered by sector.
+
+```python
+rs.industries("Technology")
+# ['Communication Equipment', 'Computer Hardware', 'Consumer Electronics', ...]
+```
+
+### `.sector_ranking(date=None) → list`
+
+Rank sectors by average RS Rating. Shows which sectors have the strongest momentum.
+
+```python
+rs.sector_ranking()
+# [{'sector': 'Energy', 'avg_rs': 78.7, 'count': 210}, ...]
+```
+
+### `.industry_ranking(date=None, sector=None) → list`
+
+Rank industries by average RS Rating. O'Neil's research shows ~50% of a stock's move is driven by its industry group.
+
+```python
+rs.industry_ranking()
+# [{'industry': 'Oil & Gas Drilling', 'sector': 'Energy', 'avg_rs': 92.0, 'count': 15}, ...]
+```
+
+### `.sector_top(sector, n=20, date=None) → list`
+
+Get top N stocks within a specific sector.
+
+```python
+rs.sector_top("Technology", n=5)
+# [{'ticker': 'AXTI', 'rs_rating': 99, 'rs_raw': 14.79, 'industry': 'Semiconductor Equipment'}, ...]
+```
+
+### `.industry_top(industry, n=20, date=None) → list`
+
+Get top N stocks within a specific industry.
+
+```python
+rs.industry_top("Semiconductors", n=5)
+# [{'ticker': 'MU', 'rs_rating': 98, 'rs_raw': 1.99}, ...]
 ```
 
 ---
