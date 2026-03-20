@@ -321,4 +321,4 @@ def test_dates_empty(mock_urlopen):
 
 def test_version():
     import rs_rating
-    assert rs_rating.__version__ == "0.1.0"
+    assert rs_rating.__version__ == "0.2.0"
