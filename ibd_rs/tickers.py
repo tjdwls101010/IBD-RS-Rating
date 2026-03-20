@@ -10,11 +10,10 @@ from . import db
 
 logger = logging.getLogger(__name__)
 
-CACHE_DAYS = 30  # refresh ticker list every 30 days
+CACHE_DAYS = 30
 
 
 def _resolve_filters():
-    """Verify filter codes against Finviz's available filters."""
     try:
         available = Screener.load_filter_dict()
         valid_codes = set()
@@ -35,7 +34,10 @@ def _resolve_filters():
 
 
 def _fetch_from_finviz():
-    """Fetch filtered ticker list from Finviz screener."""
+    """Fetch filtered ticker list with sector/industry from Finviz screener.
+
+    Returns list of dicts: [{"ticker": "NVDA", "sector": "Technology", "industry": "Semiconductors"}, ...]
+    """
     filters = _resolve_filters()
     logger.info("Fetching tickers from Finviz with filters: %s", filters)
     screener = Screener(filters=filters, table="Overview")
@@ -51,30 +53,31 @@ def _fetch_from_finviz():
         if industry in EXCLUDED_INDUSTRIES:
             excluded += 1
         else:
-            filtered.append(row)
+            filtered.append({
+                "ticker": row["Ticker"],
+                "sector": row.get("Sector", "").strip() or None,
+                "industry": industry or None,
+            })
     if excluded:
         logger.info("Excluded %d ETFs/SPACs by Industry filter", excluded)
 
-    tickers = sorted(row["Ticker"] for row in filtered)
-
+    # Add reference tickers
+    existing = {r["ticker"] for r in filtered}
     for ref in REFERENCE_TICKERS:
-        if ref not in tickers:
-            tickers.append(ref)
+        if ref not in existing:
+            filtered.append({"ticker": ref, "sector": None, "industry": None})
 
-    tickers = sorted(set(tickers))
-    logger.info("Final ticker count: %d", len(tickers))
-    return tickers
+    filtered.sort(key=lambda x: x["ticker"])
+    logger.info("Final ticker count: %d", len(filtered))
+    return filtered
 
 
 def fetch_ticker_list(conn=None, force_refresh=False):
     """Get ticker list, using cached version if available and fresh.
 
-    Args:
-        conn: DB connection for caching. If None, always fetches from Finviz.
-        force_refresh: If True, ignore cache and fetch fresh.
+    Also stores sector/industry data in the tickers table.
 
-    Returns:
-        Sorted list of ticker strings.
+    Returns sorted list of ticker strings.
     """
     if conn and not force_refresh:
         cached = db.get_meta(conn, "ticker_list")
@@ -88,11 +91,16 @@ def fetch_ticker_list(conn=None, force_refresh=False):
                 return tickers
 
     # Fetch fresh from Finviz
-    tickers = _fetch_from_finviz()
+    ticker_data = _fetch_from_finviz()
+    tickers = [t["ticker"] for t in ticker_data]
 
-    # Cache if conn is available
+    # Cache and store sector/industry
     if conn:
         db.set_meta(conn, "ticker_list", ",".join(tickers))
         db.set_meta(conn, "ticker_list_date", date.today().isoformat())
+
+        # Upsert ticker info (sector/industry)
+        records = [(t["ticker"], t["sector"], t["industry"]) for t in ticker_data]
+        db.upsert_tickers(conn, records)
 
     return tickers

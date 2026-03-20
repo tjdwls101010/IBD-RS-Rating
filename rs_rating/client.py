@@ -232,17 +232,17 @@ class RS:
             "rs_rating": "not.is.null",
         })
 
-        # Get all available dates to find the date N trading days ago
-        dates = self._request("rs", {
+        # Use SPY history to get distinct trading dates efficiently
+        spy_dates = self._request("rs", {
             "select": "date",
-            "date": f"lte.{today}",
+            "ticker": "eq.SPY",
             "rs_rating": "not.is.null",
             "order": "date.desc",
             "limit": str(days + 1),
         })
-        if len(dates) < 2:
+        if len(spy_dates) <= days:
             return []
-        prev_date = dates[-1]["date"]
+        prev_date = spy_dates[-1]["date"]
 
         previous = self._request("rs", {
             "select": "ticker,rs_rating",
@@ -289,6 +289,214 @@ class RS:
         if not first or not last:
             return {"first": None, "last": None}
         return {"first": first[0]["date"], "last": last[0]["date"]}
+
+    # ------------------------------------------------------------------
+    # Sector / Industry analysis
+    # ------------------------------------------------------------------
+
+    def sectors(self):
+        """List all available sectors.
+
+        Returns:
+            A *list* of sector name strings.
+        """
+        rows = self._request("tickers", {
+            "select": "sector",
+            "sector": "not.is.null",
+            "order": "sector.asc",
+            "limit": "10000",
+        })
+        return sorted(set(r["sector"] for r in rows if r["sector"]))
+
+    def industries(self, sector=None):
+        """List all available industries.
+
+        Args:
+            sector: Optional sector to filter by.
+
+        Returns:
+            A *list* of industry name strings.
+        """
+        params = {
+            "select": "industry",
+            "industry": "not.is.null",
+            "order": "industry.asc",
+            "limit": "10000",
+        }
+        if sector:
+            params["sector"] = f"eq.{sector}"
+        rows = self._request("tickers", params)
+        return sorted(set(r["industry"] for r in rows if r["industry"]))
+
+    def sector_ranking(self, date=None):
+        """Rank sectors by average RS Rating.
+
+        Args:
+            date: Date string. If *None*, uses latest.
+
+        Returns:
+            A *list* of dicts with ``sector``, ``avg_rs``, ``count``,
+            sorted by avg_rs descending.
+        """
+        date = date or self._latest_date()
+        if not date:
+            return []
+
+        # Get all RS ratings for the date
+        ratings = self._request("rs", {
+            "select": "ticker,rs_rating",
+            "date": f"eq.{date}",
+            "rs_rating": "not.is.null",
+        })
+
+        # Get ticker→sector mapping
+        tickers_info = self._request("tickers", {
+            "select": "ticker,sector",
+            "sector": "not.is.null",
+        })
+        sector_map = {t["ticker"]: t["sector"] for t in tickers_info}
+
+        # Aggregate by sector
+        sector_totals = {}
+        for r in ratings:
+            sector = sector_map.get(r["ticker"])
+            if sector:
+                if sector not in sector_totals:
+                    sector_totals[sector] = {"sum": 0, "count": 0}
+                sector_totals[sector]["sum"] += r["rs_rating"]
+                sector_totals[sector]["count"] += 1
+
+        result = [
+            {
+                "sector": s,
+                "avg_rs": round(d["sum"] / d["count"], 1),
+                "count": d["count"],
+            }
+            for s, d in sector_totals.items()
+        ]
+        result.sort(key=lambda x: x["avg_rs"], reverse=True)
+        return result
+
+    def industry_ranking(self, date=None, sector=None):
+        """Rank industries by average RS Rating.
+
+        Args:
+            date: Date string. If *None*, uses latest.
+            sector: Optional sector to filter by.
+
+        Returns:
+            A *list* of dicts with ``industry``, ``sector``, ``avg_rs``, ``count``,
+            sorted by avg_rs descending.
+        """
+        date = date or self._latest_date()
+        if not date:
+            return []
+
+        ratings = self._request("rs", {
+            "select": "ticker,rs_rating",
+            "date": f"eq.{date}",
+            "rs_rating": "not.is.null",
+        })
+
+        params = {"select": "ticker,sector,industry", "industry": "not.is.null"}
+        if sector:
+            params["sector"] = f"eq.{sector}"
+        tickers_info = self._request("tickers", params)
+        info_map = {t["ticker"]: t for t in tickers_info}
+
+        industry_totals = {}
+        for r in ratings:
+            info = info_map.get(r["ticker"])
+            if info:
+                key = info["industry"]
+                if key not in industry_totals:
+                    industry_totals[key] = {"sector": info["sector"], "sum": 0, "count": 0}
+                industry_totals[key]["sum"] += r["rs_rating"]
+                industry_totals[key]["count"] += 1
+
+        result = [
+            {
+                "industry": ind,
+                "sector": d["sector"],
+                "avg_rs": round(d["sum"] / d["count"], 1),
+                "count": d["count"],
+            }
+            for ind, d in industry_totals.items()
+        ]
+        result.sort(key=lambda x: x["avg_rs"], reverse=True)
+        return result
+
+    def sector_top(self, sector, n=20, date=None):
+        """Get top N stocks within a specific sector.
+
+        Args:
+            sector: Sector name (e.g., ``"Technology"``).
+            n: Number of results.
+            date: Date string. If *None*, uses latest.
+
+        Returns:
+            A *list* of dicts with ``ticker``, ``rs_rating``, ``rs_raw``, ``industry``.
+        """
+        date = date or self._latest_date()
+        if not date:
+            return []
+
+        # Get tickers in this sector
+        sector_tickers = self._request("tickers", {
+            "select": "ticker,industry",
+            "sector": f"eq.{sector}",
+        })
+        if not sector_tickers:
+            return []
+
+        ticker_industry = {t["ticker"]: t["industry"] for t in sector_tickers}
+        tickers_str = ",".join(ticker_industry.keys())
+
+        ratings = self._request("rs", {
+            "select": "ticker,rs_rating,rs_raw",
+            "date": f"eq.{date}",
+            "ticker": f"in.({tickers_str})",
+            "rs_rating": "not.is.null",
+            "order": "rs_rating.desc,rs_raw.desc",
+            "limit": str(n),
+        })
+
+        for r in ratings:
+            r["industry"] = ticker_industry.get(r["ticker"])
+        return ratings
+
+    def industry_top(self, industry, n=20, date=None):
+        """Get top N stocks within a specific industry.
+
+        Args:
+            industry: Industry name (e.g., ``"Semiconductors"``).
+            n: Number of results.
+            date: Date string. If *None*, uses latest.
+
+        Returns:
+            A *list* of dicts with ``ticker``, ``rs_rating``, ``rs_raw``.
+        """
+        date = date or self._latest_date()
+        if not date:
+            return []
+
+        industry_tickers = self._request("tickers", {
+            "select": "ticker",
+            "industry": f"eq.{industry}",
+        })
+        if not industry_tickers:
+            return []
+
+        tickers_str = ",".join(t["ticker"] for t in industry_tickers)
+
+        return self._request("rs", {
+            "select": "ticker,rs_rating,rs_raw",
+            "date": f"eq.{date}",
+            "ticker": f"in.({tickers_str})",
+            "rs_rating": "not.is.null",
+            "order": "rs_rating.desc,rs_raw.desc",
+            "limit": str(n),
+        })
 
     # ------------------------------------------------------------------
     # Internal helpers

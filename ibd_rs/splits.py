@@ -13,21 +13,17 @@ logger = logging.getLogger(__name__)
 
 
 def detect_anomalous_changes(conn, threshold=None):
-    """Detect tickers with suspicious daily price changes.
-
-    Returns list of ticker symbols where |daily change| > threshold.
-    """
     threshold = threshold or SPLIT_THRESHOLD
 
-    # Backend-aware date expression
     if db._conn_is_pg(conn):
         date_expr = "(MAX(date)::date - INTERVAL '7 days')::text"
     else:
         date_expr = "date(MAX(date), '-7 days')"
 
     query = f"""
-        SELECT ticker, date, close FROM price
-        WHERE date >= (SELECT {date_expr} FROM price)
+        SELECT ticker, date, close FROM rs
+        WHERE close IS NOT NULL
+          AND date >= (SELECT {date_expr} FROM rs WHERE close IS NOT NULL)
         ORDER BY ticker, date
     """
     df = pd.read_sql_query(query, conn)
@@ -55,10 +51,6 @@ def detect_anomalous_changes(conn, threshold=None):
 
 
 def verify_and_repair(conn, flagged_tickers):
-    """Check flagged tickers for actual splits and re-download if needed.
-
-    Returns list of tickers that were repaired.
-    """
     if not flagged_tickers:
         return []
 
@@ -71,12 +63,10 @@ def verify_and_repair(conn, flagged_tickers):
             splits = t.splits
 
             if splits.empty:
-                logger.debug("%s: no split history, likely genuine price move", ticker)
                 continue
 
             recent = splits[splits.index >= pd.Timestamp(cutoff, tz=splits.index.tz)]
             if recent.empty:
-                logger.debug("%s: no recent splits, likely genuine price move", ticker)
                 continue
 
             logger.info("%s: split detected (ratio: %s), re-downloading...",
@@ -84,17 +74,14 @@ def verify_and_repair(conn, flagged_tickers):
 
             data = yf.download(ticker, period=INITIAL_PERIOD, auto_adjust=True, progress=False)
             if data.empty:
-                logger.warning("%s: re-download returned no data", ticker)
                 continue
-
-            # Delete old data and insert fresh adjusted data
-            db.delete_ticker_prices(conn, ticker)
 
             if isinstance(data.columns, pd.MultiIndex):
                 close = data["Close"].iloc[:, 0]
             else:
                 close = data["Close"]
 
+            # Upsert fresh close prices (ON CONFLICT updates close only)
             records = [
                 (ticker, date.strftime("%Y-%m-%d"), float(price))
                 for date, price in close.dropna().items()

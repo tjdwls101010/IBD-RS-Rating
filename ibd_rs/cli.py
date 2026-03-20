@@ -21,7 +21,6 @@ def setup_logging(verbose=False):
 
 
 def cmd_init(args):
-    """Initial setup: fetch tickers, download 2yr prices, compute RS."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.get_connection()
     db.init_db(conn)
@@ -48,19 +47,17 @@ def cmd_init(args):
     count = rs.calculate_and_store(conn, recalc_all=True)
     print(f"  Computed {count} RS records")
 
-    db.prune_old_prices(conn)
     conn.close()
     print("\nInit complete!")
     cmd_status(args)
 
 
 def cmd_update(args):
-    """Daily update: download new prices, detect splits, recalculate RS."""
     conn = db.get_connection()
     db.init_db(conn)
 
     print("Step 1/4: Fetching ticker list...")
-    ticker_list = tickers_mod.fetch_ticker_list(conn)  # uses cache if fresh
+    ticker_list = tickers_mod.fetch_ticker_list(conn)
     print(f"  {len(ticker_list)} tickers")
 
     print("Step 2/4: Downloading new price data...")
@@ -80,13 +77,11 @@ def cmd_update(args):
     count = rs.calculate_and_store(conn, recalc_all=False)
     print(f"  Computed {count} RS records")
 
-    db.prune_old_prices(conn)
     conn.close()
     print("\nUpdate complete!")
 
 
 def cmd_recalc(args):
-    """Recalculate all RS ratings from existing price data."""
     conn = db.get_connection()
     print("Recalculating all RS ratings...")
     count = rs.calculate_and_store(conn, recalc_all=True)
@@ -95,7 +90,6 @@ def cmd_recalc(args):
 
 
 def cmd_top(args):
-    """Show top N stocks by RS Rating."""
     conn = db.get_connection()
     latest_date = db.get_latest_rs_date(conn)
     if not latest_date:
@@ -117,14 +111,13 @@ def cmd_top(args):
     if refs:
         print("-" * 50)
         print("Reference:")
-        for ticker, raw in refs:
-            print(f"      {ticker:<8}  {'—':>9}  {raw:>8.4f}")
+        for ticker, raw, rating in refs:
+            print(f"      {ticker:<8}  {rating or '—':>9}  {raw:>8.4f}")
 
     conn.close()
 
 
 def cmd_lookup(args):
-    """Show RS history for a specific ticker."""
     conn = db.get_connection()
     days = args.days or 30
     rows = db.get_rs_history(conn, args.ticker.upper(), days)
@@ -146,7 +139,6 @@ def cmd_lookup(args):
 
 
 def cmd_status(args):
-    """Show database statistics."""
     conn = db.get_connection()
     try:
         stats = db.get_price_stats(conn)
@@ -168,7 +160,6 @@ def cmd_status(args):
 
 
 def cmd_export(args):
-    """Export latest RS ratings to CSV files."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.get_connection()
     latest_date = db.get_latest_rs_date(conn)
@@ -179,12 +170,10 @@ def cmd_export(args):
 
     df = db.get_rs_for_export(conn, latest_date)
 
-    # Export dated file
     outpath = DATA_DIR / f"rs_ratings_{latest_date}.csv"
     df.to_csv(outpath, index=False)
     print(f"Exported {len(df)} records to {outpath}")
 
-    # Export tickers.csv (always overwrite, tracked by git)
     tickers_path = DATA_DIR / "tickers.csv"
     df.to_csv(tickers_path, index=False)
     print(f"Updated {tickers_path} ({len(df)} tickers)")
@@ -218,13 +207,8 @@ def main():
     setup_logging(args.verbose)
 
     commands = {
-        "init": cmd_init,
-        "update": cmd_update,
-        "recalc": cmd_recalc,
-        "top": cmd_top,
-        "lookup": cmd_lookup,
-        "status": cmd_status,
-        "export": cmd_export,
+        "init": cmd_init, "update": cmd_update, "recalc": cmd_recalc,
+        "top": cmd_top, "lookup": cmd_lookup, "status": cmd_status, "export": cmd_export,
     }
 
     if args.command in commands:

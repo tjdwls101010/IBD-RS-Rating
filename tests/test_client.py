@@ -283,7 +283,9 @@ def test_movers_down(mock_urlopen):
             {"ticker": "TSLA", "rs_rating": 50},
         ]),
         mock_response([
-            {"date": "2026-03-19"}, {"date": "2026-03-12"},
+            {"date": "2026-03-19"}, {"date": "2026-03-18"},
+            {"date": "2026-03-17"}, {"date": "2026-03-14"},
+            {"date": "2026-03-13"}, {"date": "2026-03-12"},
         ]),
         mock_response([
             {"ticker": "NVDA", "rs_rating": 60},
@@ -319,6 +321,81 @@ def test_dates_empty(mock_urlopen):
     assert result["last"] is None
 
 
+@patch("urllib.request.urlopen")
+def test_sectors(mock_urlopen):
+    mock_urlopen.return_value = mock_response([
+        {"sector": "Technology"},
+        {"sector": "Healthcare"},
+        {"sector": "Technology"},
+    ])
+    rs = RS()
+    result = rs.sectors()
+    assert "Technology" in result
+    assert "Healthcare" in result
+    assert len(result) == 2  # deduplicated
+
+
+@patch("urllib.request.urlopen")
+def test_industries(mock_urlopen):
+    mock_urlopen.return_value = mock_response([
+        {"industry": "Semiconductors"},
+        {"industry": "Software"},
+    ])
+    rs = RS()
+    result = rs.industries(sector="Technology")
+    assert "Semiconductors" in result
+
+
+@patch("urllib.request.urlopen")
+def test_sector_ranking(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-03-19"}]),  # _latest_date
+        mock_response([  # rs ratings
+            {"ticker": "NVDA", "rs_rating": 90},
+            {"ticker": "AAPL", "rs_rating": 70},
+            {"ticker": "LLY", "rs_rating": 60},
+        ]),
+        mock_response([  # tickers info
+            {"ticker": "NVDA", "sector": "Technology"},
+            {"ticker": "AAPL", "sector": "Technology"},
+            {"ticker": "LLY", "sector": "Healthcare"},
+        ]),
+    ]
+    rs = RS()
+    result = rs.sector_ranking()
+    assert len(result) == 2
+    assert result[0]["sector"] == "Technology"  # avg 80
+    assert result[0]["avg_rs"] == 80.0
+
+
+@patch("urllib.request.urlopen")
+def test_sector_top(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-03-19"}]),
+        mock_response([{"ticker": "NVDA", "industry": "Semiconductors"}]),
+        mock_response([{"ticker": "NVDA", "rs_rating": 90, "rs_raw": 0.5}]),
+    ]
+    rs = RS()
+    result = rs.sector_top("Technology", n=5)
+    assert len(result) == 1
+    assert result[0]["industry"] == "Semiconductors"
+
+
+@patch("urllib.request.urlopen")
+def test_industry_top(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-03-19"}]),
+        mock_response([{"ticker": "NVDA"}, {"ticker": "AMD"}]),
+        mock_response([
+            {"ticker": "NVDA", "rs_rating": 90, "rs_raw": 0.5},
+            {"ticker": "AMD", "rs_rating": 80, "rs_raw": 0.3},
+        ]),
+    ]
+    rs = RS()
+    result = rs.industry_top("Semiconductors", n=5)
+    assert len(result) == 2
+
+
 def test_version():
     import rs_rating
-    assert rs_rating.__version__ == "0.2.0"
+    assert rs_rating.__version__ == "0.3.0"
