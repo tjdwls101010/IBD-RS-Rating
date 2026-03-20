@@ -336,6 +336,6 @@ def get_rs_for_export(conn, date):
     p = "%s" if _conn_is_pg(conn) else "?"
     query = (
         f"SELECT ticker, date, rs_raw, rs_rating FROM rs "
-        f"WHERE date = {p} ORDER BY rs_rating DESC NULLS LAST"
+        f"WHERE date = {p} ORDER BY rs_raw DESC"
     )
     return pd.read_sql_query(query, conn, params=(date,))
