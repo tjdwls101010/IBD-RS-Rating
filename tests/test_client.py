@@ -179,13 +179,14 @@ def test_reference(mock_urlopen):
     mock_urlopen.side_effect = [
         mock_response([{"date": "2026-03-19"}]),
         mock_response([
-            {"ticker": "SPY", "rs_raw": 0.05, "date": "2026-03-19"},
-            {"ticker": "QQQ", "rs_raw": 0.06, "date": "2026-03-19"},
+            {"ticker": "SPY", "rs_raw": 0.05, "rs_rating": 55, "date": "2026-03-19"},
+            {"ticker": "QQQ", "rs_raw": 0.06, "rs_rating": 60, "date": "2026-03-19"},
         ]),
     ]
     rs = RS()
     result = rs.reference()
     assert len(result) == 2
+    assert result[0]["rs_rating"] is not None
 
 
 @patch("urllib.request.urlopen")

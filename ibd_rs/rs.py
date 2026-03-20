@@ -34,35 +34,22 @@ def compute_rs_raw(price_df):
 def compute_rs_rating(rs_raw_df, reference_tickers=None):
     """Compute RS Rating (1-99 percentile rank) for each ticker on each date.
 
-    Reference tickers are excluded from the ranking universe.
+    All tickers (including reference tickers like SPY, QQQ) are ranked together.
 
     Args:
         rs_raw_df: DataFrame with RS Raw scores (dates × tickers).
-        reference_tickers: List of tickers to exclude from percentile ranking.
+        reference_tickers: Unused, kept for backward compatibility.
 
     Returns:
-        DataFrame of same shape with RS Ratings (1-99). Reference tickers have NaN.
+        DataFrame of same shape with RS Ratings (1-99).
     """
-    ref = reference_tickers or REFERENCE_TICKERS
-
-    # Separate reference and ranking tickers
-    ref_cols = [c for c in ref if c in rs_raw_df.columns]
-    rank_cols = [c for c in rs_raw_df.columns if c not in ref]
-
-    if not rank_cols:
-        logger.warning("No stocks to rank (all are reference tickers)")
+    if rs_raw_df.empty:
         return pd.DataFrame()
 
-    ranking_df = rs_raw_df[rank_cols]
-
-    # Percentile rank across tickers for each date (row)
+    # Percentile rank across ALL tickers for each date (row)
     # rank(pct=True) returns values in (0, 1], scale to 1-99
-    pct_rank = ranking_df.rank(axis=1, pct=True, method="average")
+    pct_rank = rs_raw_df.rank(axis=1, pct=True, method="average")
     rs_rating = (pct_rank * 98 + 1).round(0).astype("Int64")
-
-    # Add reference tickers back with NaN ratings
-    for col in ref_cols:
-        rs_rating[col] = pd.NA
 
     return rs_rating
 

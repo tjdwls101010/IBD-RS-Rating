@@ -192,28 +192,20 @@ class RS:
         return self._request("rs", params)
 
     def reference(self, date=None):
-        """Get reference tickers (SPY, QQQ) RS Raw scores.
-
-        Reference tickers have ``rs_rating`` set to *null*.
+        """Get reference tickers (SPY, QQQ) RS scores.
 
         Returns:
-            A *list* of dicts with ``ticker``, ``rs_raw``, ``date``.
+            A *list* of dicts with ``ticker``, ``rs_raw``, ``rs_rating``, ``date``.
         """
+        date = date or self._latest_date()
         if not date:
-            latest = self._request("rs", {
-                "select": "date",
-                "order": "date.desc",
-                "limit": "1",
-                "rs_rating": "is.null",
-            })
-            if not latest:
-                return []
-            date = latest[0]["date"]
+            return []
 
         params = {
-            "select": "ticker,rs_raw,date",
+            "select": "ticker,rs_raw,rs_rating,date",
             "date": f"eq.{date}",
-            "rs_rating": "is.null",
+            "ticker": "in.(SPY,QQQ)",
+            "order": "rs_rating.desc",
         }
         return self._request("rs", params)
 

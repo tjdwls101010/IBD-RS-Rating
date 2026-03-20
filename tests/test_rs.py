@@ -92,19 +92,17 @@ def test_rs_rating_ordering():
     assert worst_raw_ticker == worst_rating_ticker
 
 
-def test_rs_rating_excludes_reference():
-    """Reference tickers should have NaN rating."""
+def test_rs_rating_includes_reference():
+    """Reference tickers (SPY, QQQ) should also have RS ratings."""
     price_df = _make_price_df(n_tickers=10, n_days=300)
-    # Rename first two as SPY and QQQ
     price_df = price_df.rename(columns={"T000": "SPY", "T001": "QQQ"})
 
     rs_raw = compute_rs_raw(price_df)
     rs_raw_last = rs_raw.iloc[[-1]]
-    rs_rating = compute_rs_rating(rs_raw_last, reference_tickers=["SPY", "QQQ"])
+    rs_rating = compute_rs_rating(rs_raw_last)
 
-    assert pd.isna(rs_rating.iloc[0]["SPY"])
-    assert pd.isna(rs_rating.iloc[0]["QQQ"])
-    # Other tickers should have ratings
+    assert rs_rating.iloc[0]["SPY"] >= 1
+    assert rs_rating.iloc[0]["QQQ"] >= 1
     assert rs_rating.iloc[0]["T002"] >= 1
 
 
