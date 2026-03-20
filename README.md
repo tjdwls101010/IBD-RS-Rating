@@ -8,6 +8,7 @@
 
 The only open-source project that provides **true percentile-ranked RS Ratings (1-99)** — not just weighted returns.
 
+[![PyPI](https://img.shields.io/pypi/v/ibd-rs-rating)](https://pypi.org/project/ibd-rs-rating/)
 [![Daily Update](https://img.shields.io/badge/updated-daily-brightgreen)](#)
 [![Stocks](https://img.shields.io/badge/stocks-4%2C600%2B-blue)](#)
 [![Python](https://img.shields.io/badge/python-3.10%2B-yellow)](#)
