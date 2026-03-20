@@ -18,6 +18,8 @@ The only open-source project that provides **true percentile-ranked RS Ratings (
 
 </div>
 
+![](https://github.com/tjdwls101010/DUMOK/blob/main/Images/forest-gump.png?raw=true)
+
 ---
 
 ## Why This Project?
