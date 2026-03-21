@@ -19,7 +19,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install ".[pg]"
+        run: pip install ".[engine,pg]"
 
       - name: Run daily update
         env:
