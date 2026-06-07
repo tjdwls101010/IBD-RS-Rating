@@ -11,3 +11,6 @@ data/rs_ratings_*.csv
 .env
 supabase/.temp/
 References/
+.claude/
+.agents/
+skills-lock.json
