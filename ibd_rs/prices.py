@@ -62,6 +62,35 @@ def _to_records(close_df):
     return records
 
 
+def _tickers_with_close_data(close_df):
+    """Return tickers that have at least one usable close value."""
+    if close_df.empty:
+        return set()
+
+    returned = set()
+    for ticker in close_df.columns:
+        values = close_df[ticker]
+        if isinstance(values, pd.DataFrame):
+            has_close = values.notna().any().any()
+        else:
+            has_close = values.notna().any()
+        if has_close:
+            returned.add(ticker)
+    return returned
+
+
+def _missing_tickers(requested_tickers, close_df):
+    returned_tickers = _tickers_with_close_data(close_df)
+    return [ticker for ticker in requested_tickers if ticker not in returned_tickers]
+
+
+def _record_missing_tickers(all_failed, requested_tickers, close_df):
+    missing = _missing_tickers(requested_tickers, close_df)
+    for ticker in missing:
+        all_failed[ticker] = "missing returned close data"
+    return missing
+
+
 def download_initial(tickers, conn):
     """Download 2 years of price history for all tickers.
 
@@ -86,19 +115,15 @@ def download_initial(tickers, conn):
 
         if close_df.empty:
             logger.warning("Batch %d returned no data", batch_num)
-            continue
+        missing = _record_missing_tickers(all_failed, batch, close_df)
+        if missing:
+            logger.warning("Batch %d missing data for %d tickers", batch_num, len(missing))
 
-        # Check yfinance errors
-        errors = getattr(yf.shared, "_ERRORS", {})
-        if errors:
-            for ticker, err in errors.items():
-                all_failed[ticker] = str(err)
-            logger.warning("Batch %d had %d ticker errors", batch_num, len(errors))
-
-        records = _to_records(close_df)
-        if records:
-            db.upsert_prices(conn, records)
-            logger.info("Batch %d: stored %d records", batch_num, len(records))
+        if not close_df.empty:
+            records = _to_records(close_df)
+            if records:
+                db.upsert_prices(conn, records)
+                logger.info("Batch %d: stored %d records", batch_num, len(records))
 
     if all_failed:
         logger.warning("Total failed tickers: %d", len(all_failed))
@@ -141,16 +166,19 @@ def download_update(tickers, conn):
             continue
 
         if close_df.empty:
-            continue
+            logger.warning("Update batch %d returned no data", batch_num)
+        missing = _record_missing_tickers(all_failed, batch, close_df)
+        if missing:
+            logger.warning("Update batch %d missing data for %d tickers", batch_num, len(missing))
 
-        errors = getattr(yf.shared, "_ERRORS", {})
-        if errors:
-            for ticker, err in errors.items():
-                all_failed[ticker] = str(err)
+        if close_df.empty:
+            continue
 
         records = _to_records(close_df)
         if records:
             db.upsert_prices(conn, records)
 
+    if all_failed:
+        db.set_meta(conn, "failed_tickers", ",".join(all_failed.keys()))
     db.set_meta(conn, "last_update_date", today)
     return all_failed
