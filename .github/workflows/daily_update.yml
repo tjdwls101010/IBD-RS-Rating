@@ -17,9 +17,12 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: requirements.lock
 
       - name: Install dependencies
-        run: pip install ".[engine,pg]"
+        run: |
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps .
 
       - name: Run daily update
         env:
