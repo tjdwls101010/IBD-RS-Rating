@@ -27,6 +27,7 @@ EXCLUDED_INDUSTRIES = ["Exchange Traded Fund", "Shell Companies"]
 # Download settings
 BATCH_SIZE = 500
 INITIAL_PERIOD = "2y"
+TRAILING_WINDOW_DAYS = 10
 PRICE_RETENTION_MONTHS = 13
 
 # Split detection
