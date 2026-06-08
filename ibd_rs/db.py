@@ -227,20 +227,32 @@ def delete_ticker_prices(conn, ticker):
 
 
 def prune_old_close(conn):
-    """Clear close prices older than the configured retention window."""
+    """Apply retention to rows older than the configured close window."""
     cutoff = (
         datetime.now() - timedelta(days=PRICE_RETENTION_MONTHS * 30)
     ).strftime("%Y-%m-%d")
     p = "%s" if _conn_is_pg(conn) else "?"
     cur = _cursor(conn)
     cur.execute(
-        f"UPDATE rs SET close = NULL WHERE date < {p} AND close IS NOT NULL",
+        f"DELETE FROM rs WHERE date < {p} AND rs_rating IS NULL",
         (cutoff,),
     )
-    pruned = cur.rowcount if cur.rowcount != -1 else 0
+    deleted = cur.rowcount if cur.rowcount != -1 else 0
+    cur.execute(
+        f"UPDATE rs SET close = NULL "
+        f"WHERE date < {p} AND rs_rating IS NOT NULL AND close IS NOT NULL",
+        (cutoff,),
+    )
+    cleared = cur.rowcount if cur.rowcount != -1 else 0
+    pruned = deleted + cleared
     cur.close()
     conn.commit()
-    logger.info("Pruned %d old close records", pruned)
+    logger.info(
+        "Pruned %d old records (%d deleted, %d close values cleared)",
+        pruned,
+        deleted,
+        cleared,
+    )
     return pruned
 
 
