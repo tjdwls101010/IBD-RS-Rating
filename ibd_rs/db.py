@@ -2,10 +2,11 @@
 
 import sqlite3
 import logging
+from datetime import datetime, timedelta
 
 import pandas as pd
 
-from .config import DB_PATH, DATA_DIR, DATABASE_URL
+from .config import DB_PATH, DATA_DIR, DATABASE_URL, PRICE_RETENTION_MONTHS
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,24 @@ def delete_ticker_prices(conn, ticker):
     cur.execute(f"UPDATE rs SET close = NULL WHERE ticker = {p}", (ticker,))
     cur.close()
     conn.commit()
+
+
+def prune_old_close(conn):
+    """Clear close prices older than the configured retention window."""
+    cutoff = (
+        datetime.now() - timedelta(days=PRICE_RETENTION_MONTHS * 30)
+    ).strftime("%Y-%m-%d")
+    p = "%s" if _conn_is_pg(conn) else "?"
+    cur = _cursor(conn)
+    cur.execute(
+        f"UPDATE rs SET close = NULL WHERE date < {p} AND close IS NOT NULL",
+        (cutoff,),
+    )
+    pruned = cur.rowcount if cur.rowcount != -1 else 0
+    cur.close()
+    conn.commit()
+    logger.info("Pruned %d old close records", pruned)
+    return pruned
 
 
 # --- Read operations ---
