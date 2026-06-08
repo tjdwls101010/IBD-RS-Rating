@@ -52,20 +52,58 @@ def cmd_init(args):
     cmd_status(args)
 
 
+def _format_ratio(ratio):
+    if ratio is None:
+        return "unknown"
+    return f"{ratio:.1%}"
+
+
+def _format_count(count):
+    if count is None:
+        return "unknown"
+    return str(count)
+
+
+def _format_coverage(coverage, universe_size):
+    if not universe_size:
+        return f"{coverage}/unknown"
+    return f"{coverage}/{universe_size}"
+
+
+def _print_completeness_report(report):
+    universe_size = report["universe_size"]
+    coverage_ratio = _format_ratio(report["coverage_ratio"])
+    rating_ratio = (
+        report["rating_coverage"] / universe_size
+        if universe_size
+        else None
+    )
+    result = "PASS" if report["is_complete"] else "FAIL"
+
+    print(f"  Latest trading day: {report['latest_date'] or 'none'}")
+    print(f"  Universe size: {universe_size or 'unknown'}")
+    print(f"  Close coverage: {_format_coverage(report['close_coverage'], universe_size)} ({coverage_ratio})")
+    print(f"  Missing close count: {_format_count(report['missing_close_count'])}")
+    print(f"  RS rating coverage: {_format_coverage(report['rating_coverage'], universe_size)} ({_format_ratio(rating_ratio)})")
+    print(f"  Missing RS rating count: {_format_count(report['missing_rating_count'])}")
+    print(f"  Threshold: {report['threshold']:.1%}")
+    print(f"  Result: {result} ({report['reason']})")
+
+
 def cmd_update(args):
     conn = db.get_connection()
     db.init_db(conn)
 
-    print("Step 1/5: Fetching ticker list...")
+    print("Step 1/6: Fetching ticker list...")
     ticker_list = tickers_mod.fetch_ticker_list(conn)
     print(f"  {len(ticker_list)} tickers")
 
-    print("Step 2/5: Downloading new price data...")
+    print("Step 2/6: Downloading new price data...")
     failed = prices.download_update(ticker_list, conn)
     if failed:
         print(f"  Warning: {len(failed)} tickers failed")
 
-    print("Step 3/5: Checking for stock splits...")
+    print("Step 3/6: Checking for stock splits...")
     flagged = splits.detect_anomalous_changes(conn)
     if flagged:
         repaired = splits.verify_and_repair(conn, flagged)
@@ -73,13 +111,20 @@ def cmd_update(args):
     else:
         print("  No anomalies detected")
 
-    print("Step 4/5: Calculating RS ratings...")
+    print("Step 4/6: Calculating RS ratings...")
     count = rs.calculate_and_store(conn, recalc_all=False)
     print(f"  Computed {count} RS records")
 
-    print("Step 5/5: Pruning old close prices...")
+    print("Step 5/6: Pruning old close prices...")
     pruned = db.prune_old_close(conn)
     print(f"  Pruned {pruned} old close records")
+
+    print("Step 6/6: Latest trading day completeness...")
+    completeness = db.check_latest_trading_day_completeness(conn, ticker_list)
+    _print_completeness_report(completeness)
+    if not completeness["is_complete"]:
+        conn.close()
+        raise SystemExit(1)
 
     conn.close()
     print("\nUpdate complete!")

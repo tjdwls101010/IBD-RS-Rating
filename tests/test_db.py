@@ -117,6 +117,86 @@ def test_get_latest_price_date(conn):
     assert db.get_latest_price_date(conn) == "2026-03-01"
 
 
+def test_check_latest_trading_day_completeness_detects_stalled_database(conn):
+    universe = [f"T{i}" for i in range(10)]
+    db.upsert_prices(
+        conn,
+        [(ticker, "2026-04-17", 10.0) for ticker in universe],
+    )
+    db.upsert_prices(
+        conn,
+        [(ticker, "2026-05-22", 20.0) for ticker in universe[:2]],
+    )
+
+    report = db.check_latest_trading_day_completeness(
+        conn,
+        universe,
+        threshold=0.90,
+    )
+
+    assert report["latest_date"] == "2026-05-22"
+    assert report["universe_size"] == 10
+    assert report["close_coverage"] == 2
+    assert report["missing_close_count"] == 8
+    assert report["rating_coverage"] == 0
+    assert report["missing_rating_count"] == 10
+    assert report["coverage_ratio"] == 0.2
+    assert report["threshold"] == 0.90
+    assert report["is_complete"] is False
+    assert report["reason"] == "close_coverage_below_threshold"
+
+
+def test_classify_latest_trading_day_completeness_threshold_boundary():
+    failed = db.classify_latest_trading_day_completeness(
+        latest_date="2026-05-22",
+        universe_size=100,
+        close_coverage=89,
+        rating_coverage=0,
+        threshold=0.90,
+    )
+    passed = db.classify_latest_trading_day_completeness(
+        latest_date="2026-05-22",
+        universe_size=100,
+        close_coverage=90,
+        rating_coverage=0,
+        threshold=0.90,
+    )
+
+    assert failed["is_complete"] is False
+    assert failed["missing_close_count"] == 11
+    assert passed["is_complete"] is True
+    assert passed["missing_close_count"] == 10
+
+
+def test_check_latest_trading_day_completeness_fails_without_price_data(conn):
+    report = db.check_latest_trading_day_completeness(
+        conn,
+        ["AAPL", "NVDA"],
+        threshold=0.90,
+    )
+
+    assert report["latest_date"] is None
+    assert report["universe_size"] == 2
+    assert report["close_coverage"] == 0
+    assert report["missing_close_count"] == 2
+    assert report["coverage_ratio"] == 0.0
+    assert report["is_complete"] is False
+    assert report["reason"] == "no_price_data"
+
+
+def test_check_latest_trading_day_completeness_fails_without_universe(conn):
+    report = db.check_latest_trading_day_completeness(
+        conn,
+        [],
+        threshold=0.90,
+    )
+
+    assert report["latest_date"] is None
+    assert report["universe_size"] == 0
+    assert report["is_complete"] is False
+    assert report["reason"] == "universe_unknown"
+
+
 def test_meta(conn):
     assert db.get_meta(conn, "test_key") is None
     db.set_meta(conn, "test_key", "test_value")

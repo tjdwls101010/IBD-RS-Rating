@@ -6,7 +6,13 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from .config import DB_PATH, DATA_DIR, DATABASE_URL, PRICE_RETENTION_MONTHS
+from .config import (
+    DB_PATH,
+    DATA_DIR,
+    DATABASE_URL,
+    PRICE_COMPLETENESS_THRESHOLD,
+    PRICE_RETENTION_MONTHS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +278,124 @@ def get_latest_rs_date(conn):
     row = cur.fetchone()
     cur.close()
     return row[0] if row and row[0] else None
+
+
+def classify_latest_trading_day_completeness(
+    *,
+    latest_date,
+    universe_size,
+    close_coverage,
+    rating_coverage,
+    threshold=PRICE_COMPLETENESS_THRESHOLD,
+):
+    """Classify whether latest trading day close coverage is complete enough."""
+    universe_size = int(universe_size or 0)
+    close_coverage = int(close_coverage or 0)
+    rating_coverage = int(rating_coverage or 0)
+
+    if universe_size <= 0:
+        return {
+            "latest_date": latest_date,
+            "universe_size": 0,
+            "close_coverage": close_coverage,
+            "missing_close_count": None,
+            "rating_coverage": rating_coverage,
+            "missing_rating_count": None,
+            "coverage_ratio": None,
+            "threshold": threshold,
+            "is_complete": False,
+            "reason": "universe_unknown",
+        }
+
+    missing_close_count = max(universe_size - close_coverage, 0)
+    missing_rating_count = max(universe_size - rating_coverage, 0)
+
+    if latest_date is None:
+        return {
+            "latest_date": None,
+            "universe_size": universe_size,
+            "close_coverage": 0,
+            "missing_close_count": universe_size,
+            "rating_coverage": 0,
+            "missing_rating_count": universe_size,
+            "coverage_ratio": 0.0,
+            "threshold": threshold,
+            "is_complete": False,
+            "reason": "no_price_data",
+        }
+
+    coverage_ratio = close_coverage / universe_size
+    is_complete = coverage_ratio >= threshold
+    return {
+        "latest_date": latest_date,
+        "universe_size": universe_size,
+        "close_coverage": close_coverage,
+        "missing_close_count": missing_close_count,
+        "rating_coverage": rating_coverage,
+        "missing_rating_count": missing_rating_count,
+        "coverage_ratio": coverage_ratio,
+        "threshold": threshold,
+        "is_complete": is_complete,
+        "reason": "complete" if is_complete else "close_coverage_below_threshold",
+    }
+
+
+def _normalize_universe_tickers(conn, universe_tickers):
+    if universe_tickers is None:
+        cached = get_meta(conn, "ticker_list")
+        if not cached:
+            return set()
+        universe_tickers = cached.split(",")
+
+    return {
+        ticker.strip()
+        for ticker in universe_tickers
+        if ticker and ticker.strip()
+    }
+
+
+def _get_tickers_with_value_on_date(conn, date, column):
+    if column not in {"close", "rs_rating"}:
+        raise ValueError(f"unsupported completeness column: {column}")
+
+    cur = _cursor(conn)
+    p = "%s" if _conn_is_pg(conn) else "?"
+    cur.execute(
+        f"SELECT DISTINCT ticker FROM rs WHERE date = {p} AND {column} IS NOT NULL",
+        (date,),
+    )
+    tickers = {row[0] for row in cur.fetchall()}
+    cur.close()
+    return tickers
+
+
+def check_latest_trading_day_completeness(
+    conn,
+    universe_tickers=None,
+    threshold=PRICE_COMPLETENESS_THRESHOLD,
+):
+    """Return latest trading day close/rating coverage against the ticker universe."""
+    universe = _normalize_universe_tickers(conn, universe_tickers)
+    latest_date = get_latest_price_date(conn)
+
+    if latest_date is None or not universe:
+        return classify_latest_trading_day_completeness(
+            latest_date=latest_date,
+            universe_size=len(universe),
+            close_coverage=0,
+            rating_coverage=0,
+            threshold=threshold,
+        )
+
+    close_tickers = _get_tickers_with_value_on_date(conn, latest_date, "close")
+    rating_tickers = _get_tickers_with_value_on_date(conn, latest_date, "rs_rating")
+    return classify_latest_trading_day_completeness(
+        latest_date=latest_date,
+        universe_size=len(universe),
+        close_coverage=len(universe & close_tickers),
+        rating_coverage=len(universe & rating_tickers),
+        threshold=threshold,
+    )
 
 
 def get_meta(conn, key):
