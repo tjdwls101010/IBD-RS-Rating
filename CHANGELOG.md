@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.1] - 2026-06-08
+
+### Fixed
+- **Data reliability recovery** — the daily pipeline had silently stalled (97% of tickers frozen at 2026-04-17 while the workflow still reported success). Root causes fixed and full RS history rebuilt:
+  - Replace the global max-date cursor with a fixed trailing window, so a single ticker racing ahead can no longer starve the rest (the core stall bug)
+  - yfinance failure detection via return-coverage check (`yf.shared._ERRORS` was removed in yfinance 1.x)
+  - Per-ticker valid-trading-day ROC (was calendar-row shift); a date is left unrated when valid coverage is below 90%, so a partial day no longer produces meaningless ratings
+  - Reference tickers (SPY/QQQ) are correctly ranked within the population (stale comment corrected)
+- Implement 13-month `close` retention (was declared but never executed); RS ratings are retained indefinitely
+- Add a silent-stall watchdog: `update` exits non-zero when the latest trading day's coverage drops below threshold, surfacing stalls through the existing failure email
+
+### Changed
+- Pin CI dependencies via `requirements.lock`; PyPI deploy metadata stays loose (unpinned yfinance/pandas major bumps had broken the pipeline)
+- `init.yml` now installs engine dependencies (was missing them)
+
 ## [0.3.0] - 2026-03-20
 
 ### Added
