@@ -15,6 +15,7 @@ DB_PATH = DATA_DIR / "rs.db"
 # RS formula weights: {lookback_days: weight}
 RS_WEIGHTS = {63: 0.4, 126: 0.2, 189: 0.2, 252: 0.2}
 RS_UNIVERSE_THRESHOLD = 0.90
+PRICE_COMPLETENESS_THRESHOLD = 0.90
 
 # Reference tickers are included in the RS Rating population and ranked together.
 REFERENCE_TICKERS = ["SPY", "QQQ"]
