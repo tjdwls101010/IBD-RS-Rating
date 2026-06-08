@@ -147,6 +147,26 @@ def upsert_rs(conn, records):
     logger.info("Upserted %d RS records", len(records))
 
 
+def clear_rs_for_dates(conn, dates):
+    """Clear RS fields for dates that are about to be recalculated."""
+    date_values = list(dates)
+    if not date_values:
+        return
+
+    p = "%s" if _conn_is_pg(conn) else "?"
+    batch_size = 500
+    cur = _cursor(conn)
+    for i in range(0, len(date_values), batch_size):
+        batch = date_values[i : i + batch_size]
+        placeholders = ", ".join([p] * len(batch))
+        cur.execute(
+            f"UPDATE rs SET rs_raw = NULL, rs_rating = NULL WHERE date IN ({placeholders})",
+            tuple(batch),
+        )
+    cur.close()
+    conn.commit()
+
+
 def upsert_tickers(conn, records):
     """Insert or update ticker info. records: list of (ticker, sector, industry)."""
     if not records:
