@@ -6,10 +6,19 @@ import time
 import pandas as pd
 import yfinance as yf
 
-from .config import BATCH_SIZE, INITIAL_PERIOD, RATE_LIMIT_PAUSE
+from .config import BATCH_SIZE, INITIAL_PERIOD, RATE_LIMIT_PAUSE, TRAILING_WINDOW_DAYS
 from . import db
 
 logger = logging.getLogger(__name__)
+
+
+def _today():
+    return pd.Timestamp.now().normalize()
+
+
+def _trailing_window_start():
+    today = pd.Timestamp(_today()).normalize()
+    return (today - pd.Timedelta(days=TRAILING_WINDOW_DAYS)).strftime("%Y-%m-%d")
 
 
 def _download_batch(tickers, **kwargs):
@@ -133,24 +142,14 @@ def download_initial(tickers, conn):
 
 
 def download_update(tickers, conn):
-    """Download new price data since last update.
+    """Download recent price data over a fixed trailing window.
 
     Returns dict of failed tickers and their error messages.
     """
-    last_date = db.get_latest_price_date(conn)
-    if not last_date:
-        logger.error("No existing data. Run 'init' first.")
-        return {}
+    today = pd.Timestamp(_today()).normalize().strftime("%Y-%m-%d")
+    start = _trailing_window_start()
 
-    # Start from the day after last stored date
-    start = (pd.Timestamp(last_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    today = pd.Timestamp.now().strftime("%Y-%m-%d")
-
-    if start > today:
-        logger.info("Already up to date (last: %s)", last_date)
-        return {}
-
-    logger.info("Updating prices from %s to %s for %d tickers", start, today, len(tickers))
+    logger.info("Updating prices over trailing window from %s to %s for %d tickers", start, today, len(tickers))
 
     all_failed = {}
     for i in range(0, len(tickers), BATCH_SIZE):
