@@ -214,7 +214,7 @@ def test_get_price_stats(conn):
     assert stats["rs_rows"] == 1
 
 
-def test_prune_old_close_clears_only_old_close_and_preserves_rs(conn, monkeypatch):
+def test_prune_old_close_deletes_old_rows_without_rating_and_preserves_rs(conn, monkeypatch):
     cutoff = _set_retention_now(monkeypatch)
     old_date = _offset_date(cutoff, -1)
     recent_date = _offset_date(cutoff, 1)
@@ -228,10 +228,14 @@ def test_prune_old_close_clears_only_old_close_and_preserves_rs(conn, monkeypatc
         ],
     )
     db.upsert_rs(conn, [("AAPL", old_date, 0.345, 72)])
+    conn.execute(
+        "INSERT INTO rs (ticker, date, close, rs_raw, rs_rating) VALUES (?, ?, ?, ?, ?)",
+        ("GOOGL", old_date, None, None, None),
+    )
 
     pruned = db.prune_old_close(conn)
 
-    assert pruned == 2
+    assert pruned == 3
     old_with_rs = conn.execute(
         "SELECT close, rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
         ("AAPL", old_date),
@@ -244,10 +248,15 @@ def test_prune_old_close_clears_only_old_close_and_preserves_rs(conn, monkeypatc
         "SELECT close, rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
         ("MSFT", old_date),
     ).fetchone()
+    old_empty_shell = conn.execute(
+        "SELECT close, rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
+        ("GOOGL", old_date),
+    ).fetchone()
 
     assert old_with_rs == (None, 0.345, 72)
     assert recent == (160.0, None, None)
-    assert old_close_only == (None, None, None)
+    assert old_close_only is None
+    assert old_empty_shell is None
     assert db.get_rs_history(conn, "AAPL", 10) == [(old_date, 0.345, 72)]
 
 
@@ -276,5 +285,4 @@ def test_prune_old_close_keeps_cutoff_boundary_and_is_idempotent(conn, monkeypat
     assert rows == [
         ("AAPL", cutoff, 150.0),
         ("AAPL", recent_date, 160.0),
-        ("NVDA", old_date, None),
     ]
