@@ -56,16 +56,16 @@ def cmd_update(args):
     conn = db.get_connection()
     db.init_db(conn)
 
-    print("Step 1/4: Fetching ticker list...")
+    print("Step 1/5: Fetching ticker list...")
     ticker_list = tickers_mod.fetch_ticker_list(conn)
     print(f"  {len(ticker_list)} tickers")
 
-    print("Step 2/4: Downloading new price data...")
+    print("Step 2/5: Downloading new price data...")
     failed = prices.download_update(ticker_list, conn)
     if failed:
         print(f"  Warning: {len(failed)} tickers failed")
 
-    print("Step 3/4: Checking for stock splits...")
+    print("Step 3/5: Checking for stock splits...")
     flagged = splits.detect_anomalous_changes(conn)
     if flagged:
         repaired = splits.verify_and_repair(conn, flagged)
@@ -73,9 +73,13 @@ def cmd_update(args):
     else:
         print("  No anomalies detected")
 
-    print("Step 4/4: Calculating RS ratings...")
+    print("Step 4/5: Calculating RS ratings...")
     count = rs.calculate_and_store(conn, recalc_all=False)
     print(f"  Computed {count} RS records")
+
+    print("Step 5/5: Pruning old close prices...")
+    pruned = db.prune_old_close(conn)
+    print(f"  Pruned {pruned} old close records")
 
     conn.close()
     print("\nUpdate complete!")

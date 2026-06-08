@@ -1,7 +1,10 @@
 """Tests for database operations."""
 
+from datetime import datetime, timedelta
+
 import pytest
 from ibd_rs import db
+from ibd_rs.config import PRICE_RETENTION_MONTHS
 
 
 @pytest.fixture
@@ -10,6 +13,26 @@ def conn():
     db.init_db(c)
     yield c
     c.close()
+
+
+def _set_retention_now(monkeypatch):
+    fixed_now = datetime(2026, 6, 8)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls):
+            return fixed_now
+
+    monkeypatch.setattr(db, "datetime", FixedDateTime)
+    return (
+        fixed_now - timedelta(days=PRICE_RETENTION_MONTHS * 30)
+    ).strftime("%Y-%m-%d")
+
+
+def _offset_date(date, days):
+    return (
+        datetime.strptime(date, "%Y-%m-%d") + timedelta(days=days)
+    ).strftime("%Y-%m-%d")
 
 
 def test_init_db_creates_tables(conn):
@@ -109,3 +132,69 @@ def test_get_price_stats(conn):
     assert stats["price_rows"] == 1
     assert stats["price_tickers"] == 1
     assert stats["rs_rows"] == 1
+
+
+def test_prune_old_close_clears_only_old_close_and_preserves_rs(conn, monkeypatch):
+    cutoff = _set_retention_now(monkeypatch)
+    old_date = _offset_date(cutoff, -1)
+    recent_date = _offset_date(cutoff, 1)
+
+    db.upsert_prices(
+        conn,
+        [
+            ("AAPL", old_date, 150.0),
+            ("AAPL", recent_date, 160.0),
+            ("MSFT", old_date, 250.0),
+        ],
+    )
+    db.upsert_rs(conn, [("AAPL", old_date, 0.345, 72)])
+
+    pruned = db.prune_old_close(conn)
+
+    assert pruned == 2
+    old_with_rs = conn.execute(
+        "SELECT close, rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
+        ("AAPL", old_date),
+    ).fetchone()
+    recent = conn.execute(
+        "SELECT close, rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
+        ("AAPL", recent_date),
+    ).fetchone()
+    old_close_only = conn.execute(
+        "SELECT close, rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
+        ("MSFT", old_date),
+    ).fetchone()
+
+    assert old_with_rs == (None, 0.345, 72)
+    assert recent == (160.0, None, None)
+    assert old_close_only == (None, None, None)
+    assert db.get_rs_history(conn, "AAPL", 10) == [(old_date, 0.345, 72)]
+
+
+def test_prune_old_close_keeps_cutoff_boundary_and_is_idempotent(conn, monkeypatch):
+    cutoff = _set_retention_now(monkeypatch)
+    old_date = _offset_date(cutoff, -1)
+    recent_date = _offset_date(cutoff, 1)
+
+    assert db.prune_old_close(conn) == 0
+
+    db.upsert_prices(
+        conn,
+        [
+            ("AAPL", cutoff, 150.0),
+            ("AAPL", recent_date, 160.0),
+            ("NVDA", old_date, 800.0),
+        ],
+    )
+
+    assert db.prune_old_close(conn) == 1
+    assert db.prune_old_close(conn) == 0
+
+    rows = conn.execute(
+        "SELECT ticker, date, close FROM rs ORDER BY ticker, date"
+    ).fetchall()
+    assert rows == [
+        ("AAPL", cutoff, 150.0),
+        ("AAPL", recent_date, 160.0),
+        ("NVDA", old_date, None),
+    ]
