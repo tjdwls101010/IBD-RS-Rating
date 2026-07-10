@@ -1,12 +1,21 @@
 """Download and manage price data via yfinance."""
 
 import logging
+import random
 import time
 
 import pandas as pd
 import yfinance as yf
 
-from .config import BATCH_SIZE, INITIAL_PERIOD, RATE_LIMIT_PAUSE, TRAILING_WINDOW_DAYS
+from .config import (
+    BATCH_SIZE,
+    DOWNLOAD_BACKOFF_BASE,
+    DOWNLOAD_RETRY_ATTEMPTS,
+    DOWNLOAD_THREADS,
+    INITIAL_PERIOD,
+    INTER_BATCH_SLEEP_SECONDS,
+    TRAILING_WINDOW_DAYS,
+)
 from . import db
 
 logger = logging.getLogger(__name__)
@@ -22,31 +31,34 @@ def _trailing_window_start():
 
 
 def _download_batch(tickers, **kwargs):
-    """Download price data for a batch of tickers with rate limit handling.
+    """Download price data for a batch of tickers, with exponential backoff + jitter.
 
-    Returns DataFrame with Close prices (dates × tickers).
+    Returns DataFrame with Close prices (dates × tickers). Raises after
+    exhausting DOWNLOAD_RETRY_ATTEMPTS.
     """
-    try:
-        data = yf.download(
-            tickers,
-            auto_adjust=True,
-            threads=True,
-            progress=True,
-            **kwargs,
-        )
-    except Exception as e:
-        if "Rate" in str(type(e).__name__) or "429" in str(e):
-            logger.warning("Rate limited. Waiting %ds...", RATE_LIMIT_PAUSE)
-            time.sleep(RATE_LIMIT_PAUSE)
+    last_exc = None
+    data = None
+    for attempt in range(1, DOWNLOAD_RETRY_ATTEMPTS + 1):
+        try:
             data = yf.download(
                 tickers,
                 auto_adjust=True,
-                threads=True,
+                threads=DOWNLOAD_THREADS,
                 progress=True,
                 **kwargs,
             )
-        else:
-            raise
+            break
+        except Exception as e:
+            last_exc = e
+            if attempt < DOWNLOAD_RETRY_ATTEMPTS:
+                delay = DOWNLOAD_BACKOFF_BASE * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                logger.warning(
+                    "Download attempt %d/%d failed (%s); retrying in %.1fs",
+                    attempt, DOWNLOAD_RETRY_ATTEMPTS, e, delay,
+                )
+                time.sleep(delay)
+    else:
+        raise last_exc
 
     if data.empty:
         return pd.DataFrame()
@@ -134,6 +146,8 @@ def download_initial(tickers, conn):
                 db.upsert_prices(conn, records)
                 logger.info("Batch %d: stored %d records", batch_num, len(records))
 
+        time.sleep(INTER_BATCH_SLEEP_SECONDS)
+
     if all_failed:
         logger.warning("Total failed tickers: %d", len(all_failed))
         db.set_meta(conn, "failed_tickers", ",".join(all_failed.keys()))
@@ -170,12 +184,12 @@ def download_update(tickers, conn):
         if missing:
             logger.warning("Update batch %d missing data for %d tickers", batch_num, len(missing))
 
-        if close_df.empty:
-            continue
+        if not close_df.empty:
+            records = _to_records(close_df)
+            if records:
+                db.upsert_prices(conn, records)
 
-        records = _to_records(close_df)
-        if records:
-            db.upsert_prices(conn, records)
+        time.sleep(INTER_BATCH_SLEEP_SECONDS)
 
     if all_failed:
         db.set_meta(conn, "failed_tickers", ",".join(all_failed.keys()))
