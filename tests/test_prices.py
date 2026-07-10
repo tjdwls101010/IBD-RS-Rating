@@ -16,6 +16,13 @@ def conn():
     c.close()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    """Every test in this file exercises retry/inter-batch backoff paths that
+    call time.sleep; none should burn real wall-clock time."""
+    monkeypatch.setattr(prices.time, "sleep", lambda *_: None)
+
+
 def _price_frame(data):
     return pd.DataFrame(data, index=pd.to_datetime(["2000-01-02", "2000-01-03"]))
 
@@ -60,6 +67,61 @@ def _ticker_price_count(conn, ticker):
         "SELECT COUNT(*) FROM rs WHERE ticker = ? AND close IS NOT NULL",
         (ticker,),
     ).fetchone()[0]
+
+
+def _multiindex_close(tickers, dates, value=10.0):
+    columns = pd.MultiIndex.from_product([["Close"], tickers])
+    return pd.DataFrame(value, index=pd.to_datetime(dates), columns=columns)
+
+
+def test_download_batch_recovers_after_a_transient_failure(monkeypatch):
+    calls = {"n": 0}
+    ok_data = _multiindex_close(["A", "B"], ["2026-05-20", "2026-05-21"])
+
+    def flaky_download(tickers, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("rate limited")
+        return ok_data
+
+    monkeypatch.setattr(prices.yf, "download", flaky_download)
+
+    result = prices._download_batch(["A", "B"], start="2026-05-19")
+
+    assert calls["n"] == 3
+    assert list(result.columns) == ["A", "B"]
+
+
+def test_download_batch_raises_after_exhausting_all_retries(monkeypatch):
+    def always_fail(tickers, **kwargs):
+        raise RuntimeError("still rate limited")
+
+    monkeypatch.setattr(prices.yf, "download", always_fail)
+
+    with pytest.raises(RuntimeError, match="still rate limited"):
+        prices._download_batch(["A", "B"], start="2026-05-19")
+
+
+def test_download_update_stores_data_after_a_batch_level_retry(monkeypatch, conn):
+    """End-to-end version of the plan's Slice 3 scenario: a rate-limit error
+    once, then success, and the data ultimately gets stored."""
+    _set_update_today(monkeypatch)
+    calls = {"n": 0}
+    ok_data = _multiindex_close(["A"], ["2026-05-22"])
+
+    def flaky_download(tickers, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("429 rate limited")
+        return ok_data
+
+    monkeypatch.setattr(prices.yf, "download", flaky_download)
+
+    failed = prices.download_update(["A"], conn)
+
+    assert failed == {}
+    assert calls["n"] == 2
+    assert _stored_tickers(conn) == ["A"]
 
 
 def test_download_initial_stores_all_tickers_when_all_returned(monkeypatch, conn):

@@ -32,7 +32,11 @@ UNIVERSE_COMPLETENESS_RATIO = 0.98  # reject if fetched < this fraction of Finvi
 UNIVERSE_FETCH_RETRIES = 4
 
 # Download settings
-BATCH_SIZE = 500
+BATCH_SIZE = 75  # was 500; smaller batches limit the blast radius of a rate-limit block
+DOWNLOAD_THREADS = 4  # reduced concurrency vs. yf.download's default thread pool (threads=True)
+DOWNLOAD_RETRY_ATTEMPTS = 5
+DOWNLOAD_BACKOFF_BASE = 1.0  # seconds; doubles each attempt (1, 2, 4, 8) plus jitter
+INTER_BATCH_SLEEP_SECONDS = 2
 INITIAL_PERIOD = "2y"
 TRAILING_WINDOW_DAYS = 10
 PRICE_RETENTION_MONTHS = 13
@@ -47,6 +51,3 @@ RS_RECOMPUTE_WINDOW_DAYS = 10
 # Split detection
 SPLIT_THRESHOLD = 0.40  # flag daily changes > 40%
 SPLIT_LOOKBACK_DAYS = 7
-
-# Rate limit handling
-RATE_LIMIT_PAUSE = 60  # seconds
