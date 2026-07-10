@@ -50,7 +50,7 @@ def test_cmd_update_prunes_old_close_once_after_rs_calculation(monkeypatch, caps
     monkeypatch.setattr(
         cli.db,
         "check_latest_trading_day_completeness",
-        lambda passed_conn, tickers: calls.append("completeness") or {
+        lambda passed_conn, tickers, min_universe_size=0: calls.append("completeness") or {
             "latest_date": "2026-05-22",
             "universe_size": 1,
             "close_coverage": 1,
@@ -98,8 +98,8 @@ def test_cmd_update_exits_1_when_latest_day_completeness_fails(monkeypatch, caps
     assert exc.value.code == 1
     assert "Latest trading day completeness" in output
     assert "Latest trading day: 2026-05-22" in output
-    assert "Close coverage: 2/10" in output
-    assert "Missing close count: 8" in output
+    assert "Close coverage: 2/3000" in output  # denominator floored to UNIVERSE_FLOOR, not the 10-ticker test universe
+    assert "Missing close count: 2998" in output
     assert "Result: FAIL" in output
 
 

@@ -184,6 +184,37 @@ def test_check_latest_trading_day_completeness_fails_without_price_data(conn):
     assert report["reason"] == "no_price_data"
 
 
+def test_check_latest_trading_day_completeness_fails_on_universe_collapse_against_absolute_floor(conn):
+    """Reproduces the watchdog blind spot from the 2026-07-08 incident: the
+    fetched universe itself collapsed to 55 tickers, so measuring coverage
+    against that same collapsed universe reads as 100% PASS. Passing
+    min_universe_size (the last-good/expected universe size, independent of
+    what this run happened to fetch) must fail the run instead."""
+    collapsed_universe = [f"T{i}" for i in range(55)]
+    db.upsert_prices(conn, [(ticker, "2026-07-08", 10.0) for ticker in collapsed_universe])
+
+    report = db.check_latest_trading_day_completeness(
+        conn,
+        collapsed_universe,
+        threshold=0.90,
+        min_universe_size=4600,
+    )
+
+    assert report["universe_size"] == 4600
+    assert report["close_coverage"] == 55
+    assert report["coverage_ratio"] < 0.02
+    assert report["is_complete"] is False
+
+
+def test_check_latest_trading_day_completeness_min_universe_size_defaults_to_no_floor(conn):
+    universe = [f"T{i}" for i in range(10)]
+    db.upsert_prices(conn, [(ticker, "2026-05-22", 20.0) for ticker in universe])
+
+    report = db.check_latest_trading_day_completeness(conn, universe, threshold=0.90)
+
+    assert report["universe_size"] == 10  # unaffected when min_universe_size is not passed
+
+
 def test_check_latest_trading_day_completeness_fails_without_universe(conn):
     report = db.check_latest_trading_day_completeness(
         conn,

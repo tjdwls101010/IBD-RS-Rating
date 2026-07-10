@@ -385,15 +385,24 @@ def check_latest_trading_day_completeness(
     conn,
     universe_tickers=None,
     threshold=PRICE_COMPLETENESS_THRESHOLD,
+    min_universe_size=0,
 ):
-    """Return latest trading day close/rating coverage against the ticker universe."""
+    """Return latest trading day close/rating coverage against the ticker universe.
+
+    `min_universe_size` is an absolute floor for the denominator, independent
+    of `universe_tickers` -- pass the last-good/expected universe size so a
+    collapsed `universe_tickers` (e.g. a truncated Finviz fetch) can't read as
+    100% coverage just because it's small. Coverage counts themselves are
+    still measured against the real intersection with `universe_tickers`.
+    """
     universe = _normalize_universe_tickers(conn, universe_tickers)
+    universe_size = max(len(universe), min_universe_size)
     latest_date = get_latest_price_date(conn)
 
-    if latest_date is None or not universe:
+    if latest_date is None or not universe_size:
         return classify_latest_trading_day_completeness(
             latest_date=latest_date,
-            universe_size=len(universe),
+            universe_size=universe_size,
             close_coverage=0,
             rating_coverage=0,
             threshold=threshold,
@@ -403,7 +412,7 @@ def check_latest_trading_day_completeness(
     rating_tickers = _get_tickers_with_value_on_date(conn, latest_date, "rs_rating")
     return classify_latest_trading_day_completeness(
         latest_date=latest_date,
-        universe_size=len(universe),
+        universe_size=universe_size,
         close_coverage=len(universe & close_tickers),
         rating_coverage=len(universe & rating_tickers),
         threshold=threshold,
