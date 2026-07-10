@@ -4,6 +4,7 @@ import pytest
 
 from ibd_rs import db
 from ibd_rs import cli
+from ibd_rs.tickers import UniverseResult
 
 
 class FakeConn:
@@ -23,7 +24,7 @@ def test_cmd_update_prunes_old_close_once_after_rs_calculation(monkeypatch, caps
     monkeypatch.setattr(
         cli.tickers_mod,
         "fetch_ticker_list",
-        lambda passed_conn: calls.append("tickers") or ["AAPL"],
+        lambda passed_conn: calls.append("tickers") or UniverseResult(["AAPL"], True, "ok"),
     )
     monkeypatch.setattr(
         cli.prices,
@@ -81,7 +82,10 @@ def test_cmd_update_exits_1_when_latest_day_completeness_fails(monkeypatch, caps
     db.upsert_prices(conn, [(ticker, "2026-05-22", 20.0) for ticker in universe[:2]])
 
     monkeypatch.setattr(cli.db, "get_connection", lambda: conn)
-    monkeypatch.setattr(cli.tickers_mod, "fetch_ticker_list", lambda passed_conn: universe)
+    monkeypatch.setattr(
+        cli.tickers_mod, "fetch_ticker_list",
+        lambda passed_conn: UniverseResult(universe, True, "ok"),
+    )
     monkeypatch.setattr(cli.prices, "download_update", lambda tickers, passed_conn: {})
     monkeypatch.setattr(cli.splits, "detect_anomalous_changes", lambda passed_conn: [])
     monkeypatch.setattr(cli.rs, "calculate_and_store", lambda passed_conn, recalc_all: 0)
@@ -97,3 +101,46 @@ def test_cmd_update_exits_1_when_latest_day_completeness_fails(monkeypatch, caps
     assert "Close coverage: 2/10" in output
     assert "Missing close count: 8" in output
     assert "Result: FAIL" in output
+
+
+def test_cmd_update_exits_1_when_universe_fetch_is_degraded(monkeypatch, capsys):
+    conn = db.get_connection(":memory:")
+    db.init_db(conn)
+    universe = [f"T{i}" for i in range(10)]
+    db.upsert_prices(conn, [(ticker, "2026-05-22", 20.0) for ticker in universe])
+
+    monkeypatch.setattr(cli.db, "get_connection", lambda: conn)
+    monkeypatch.setattr(
+        cli.tickers_mod, "fetch_ticker_list",
+        lambda passed_conn: UniverseResult(universe, False, "fetched 55 tickers, below absolute floor 3000"),
+    )
+    monkeypatch.setattr(cli.prices, "download_update", lambda tickers, passed_conn: {})
+    monkeypatch.setattr(cli.splits, "detect_anomalous_changes", lambda passed_conn: [])
+    monkeypatch.setattr(cli.rs, "calculate_and_store", lambda passed_conn, recalc_all: 0)
+    monkeypatch.setattr(cli.db, "prune_old_close", lambda passed_conn: 0)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_update(args=None)
+
+    output = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "WARNING: universe fetch degraded" in output
+    assert "below absolute floor" in output
+
+
+def test_cmd_init_refuses_to_run_on_an_untrusted_universe(monkeypatch, capsys, tmp_path):
+    conn = db.get_connection(":memory:")
+
+    monkeypatch.setattr(cli.db, "get_connection", lambda: conn)
+    monkeypatch.setattr(cli, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        cli.tickers_mod, "fetch_ticker_list",
+        lambda passed_conn, force_refresh: UniverseResult(["T0"], False, "fetched 55 tickers, below absolute floor 3000"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_init(args=None)
+
+    output = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "Refusing to init from an untrusted universe" in output
