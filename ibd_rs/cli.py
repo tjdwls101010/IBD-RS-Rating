@@ -3,7 +3,7 @@
 import argparse
 import logging
 
-from .config import DATA_DIR
+from .config import DATA_DIR, UNIVERSE_FLOOR
 from . import db
 from . import tickers as tickers_mod
 from . import prices
@@ -129,7 +129,9 @@ def cmd_update(args):
     print(f"  Pruned {pruned} old close records")
 
     print("Step 6/6: Latest trading day completeness...")
-    completeness = db.check_latest_trading_day_completeness(conn, ticker_list)
+    completeness = db.check_latest_trading_day_completeness(
+        conn, ticker_list, min_universe_size=UNIVERSE_FLOOR,
+    )
     _print_completeness_report(completeness)
 
     conn.close()

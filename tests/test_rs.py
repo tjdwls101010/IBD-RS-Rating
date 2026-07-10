@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from ibd_rs import db
+from ibd_rs.config import PRICE_RETENTION_MONTHS, RS_RECOMPUTE_WINDOW_DAYS, RS_WEIGHTS
 from ibd_rs.rs import calculate_and_store, compute_rs_raw, compute_rs_rating
 
 
@@ -231,6 +232,103 @@ def test_recalc_all_backfills_dates_before_global_rs_cursor(conn):
     assert backfilled is not None
     assert backfilled[0] is not None
     assert backfilled[1] is not None
+
+
+def test_incremental_recompute_reraises_recent_day_left_unrated_by_a_prior_low_coverage_run(conn):
+    """Reproduces the 2026-07-08 'permanent hole' bug: a day stored with rs_raw
+    but NULL rating (because an earlier run had too few tickers) must still
+    get re-rated by a later incremental run once full data is available --
+    the old cursor (MAX(date) WHERE rs_raw IS NOT NULL) would otherwise never
+    revisit it, since rs_raw was already non-NULL for that date."""
+    dates = pd.bdate_range("2024-01-01", periods=280)
+    tickers = [f"T{i:03d}" for i in range(100)]
+    price_records = [
+        (ticker, date.strftime("%Y-%m-%d"), 100 + i + day_index)
+        for i, ticker in enumerate(tickers)
+        for day_index, date in enumerate(dates)
+    ]
+    db.upsert_prices(conn, price_records)
+    calculate_and_store(conn, recalc_all=True)
+
+    # Simulate a low-coverage run: rs_raw got stored for the latest day (from
+    # whatever few tickers had data) but it was left unrated.
+    last_date = dates[-1].strftime("%Y-%m-%d")
+    db.clear_rs_for_dates(conn, [last_date])
+    db.upsert_rs(conn, [("T000", last_date, 0.01, None)])
+    unrated_before = conn.execute(
+        "SELECT COUNT(*) FROM rs WHERE date = ? AND rs_rating IS NOT NULL", (last_date,)
+    ).fetchone()[0]
+    assert unrated_before == 0
+
+    # Full price data for that date is already present (upserted above), so a
+    # later incremental run should re-rate it now.
+    calculate_and_store(conn, recalc_all=False)
+
+    rated_after = conn.execute(
+        "SELECT COUNT(*) FROM rs WHERE date = ? AND rs_rating IS NOT NULL", (last_date,)
+    ).fetchone()[0]
+    assert rated_after == 100
+
+
+def test_incremental_recompute_leaves_history_outside_the_trailing_window_untouched(conn):
+    dates = pd.bdate_range("2024-01-01", periods=280)
+    tickers = [f"T{i:03d}" for i in range(100)]
+    price_records = [
+        (ticker, date.strftime("%Y-%m-%d"), 100 + i + day_index)
+        for i, ticker in enumerate(tickers)
+        for day_index, date in enumerate(dates)
+    ]
+    db.upsert_prices(conn, price_records)
+    calculate_and_store(conn, recalc_all=True)
+
+    old_date = dates[252].strftime("%Y-%m-%d")  # well outside the trailing window
+    before = conn.execute(
+        "SELECT ticker, rs_raw, rs_rating FROM rs WHERE date = ? ORDER BY ticker", (old_date,)
+    ).fetchall()
+
+    # A later price "correction" for that old date must not leak into a
+    # recompute -- proves the date is genuinely skipped, not just unchanged
+    # by coincidence.
+    db.upsert_prices(conn, [(tickers[0], old_date, 99999.0)])
+    calculate_and_store(conn, recalc_all=False)
+
+    after = conn.execute(
+        "SELECT ticker, rs_raw, rs_rating FROM rs WHERE date = ? ORDER BY ticker", (old_date,)
+    ).fetchall()
+    assert after == before
+
+
+def test_incremental_recompute_still_backfills_dates_newer_than_the_cursor(conn):
+    """The trailing window is additive, not a replacement for catch-up: a
+    multi-day gap larger than the window must still be fully recomputed."""
+    dates = pd.bdate_range("2024-01-01", periods=280)
+    tickers = [f"T{i:03d}" for i in range(100)]
+    price_records = [
+        (ticker, date.strftime("%Y-%m-%d"), 100 + i + day_index)
+        for i, ticker in enumerate(tickers)
+        for day_index, date in enumerate(dates)
+    ]
+    # Seed RS only through a cursor well before the trailing window, leaving
+    # a gap bigger than RS_RECOMPUTE_WINDOW_DAYS with prices but no RS at all.
+    cutoff_index = 280 - RS_RECOMPUTE_WINDOW_DAYS - 5
+    db.upsert_prices(conn, [r for r in price_records if r[1] <= dates[cutoff_index].strftime("%Y-%m-%d")])
+    calculate_and_store(conn, recalc_all=True)
+    db.upsert_prices(conn, [r for r in price_records if r[1] > dates[cutoff_index].strftime("%Y-%m-%d")])
+
+    calculate_and_store(conn, recalc_all=False)
+
+    first_gap_date = dates[cutoff_index + 1].strftime("%Y-%m-%d")
+    rated = conn.execute(
+        "SELECT COUNT(*) FROM rs WHERE date = ? AND rs_rating IS NOT NULL", (first_gap_date,)
+    ).fetchone()[0]
+    assert rated == 100
+
+
+def test_recompute_window_leaves_enough_lookback_margin_in_retention_window():
+    trading_days_per_month = 21  # conservative approximation used across this codebase
+    retained_trading_days = PRICE_RETENTION_MONTHS * trading_days_per_month
+    max_lookback = max(RS_WEIGHTS)
+    assert RS_RECOMPUTE_WINDOW_DAYS + max_lookback <= retained_trading_days
 
 
 def test_rs_raw_higher_ticker_has_higher_raw():
