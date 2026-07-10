@@ -4,7 +4,7 @@ import logging
 
 import pandas as pd
 
-from .config import RS_UNIVERSE_THRESHOLD, RS_WEIGHTS
+from .config import RS_RECOMPUTE_WINDOW_DAYS, RS_UNIVERSE_THRESHOLD, RS_WEIGHTS
 from . import db
 
 logger = logging.getLogger(__name__)
@@ -99,11 +99,18 @@ def calculate_and_store(conn, recalc_all=False):
     rs_raw_df = compute_rs_raw(price_df)
     rs_rating_df = compute_rs_rating(rs_raw_df, universe_size=len(price_df.columns))
 
-    # Determine which dates to store
+    # Determine which dates to store. The incremental path recomputes dates
+    # newer than the cursor (catch-up after a gap) UNION a trailing window of
+    # the most recent trading days (self-healing: a day left unrated by an
+    # earlier low-coverage run is re-rated once its data completes, without
+    # requiring the cursor itself to move).
     if not recalc_all:
         last_rs_date = db.get_latest_rs_date(conn)
         if last_rs_date:
             mask = rs_raw_df.index > pd.Timestamp(last_rs_date)
+            if len(rs_raw_df.index) > 0:
+                trailing_start = rs_raw_df.index[-RS_RECOMPUTE_WINDOW_DAYS:].min()
+                mask |= rs_raw_df.index >= trailing_start
             rs_raw_df = rs_raw_df.loc[mask]
             rs_rating_df = rs_rating_df.loc[mask]
 

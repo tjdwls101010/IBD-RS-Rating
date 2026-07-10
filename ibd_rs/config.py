@@ -37,6 +37,13 @@ INITIAL_PERIOD = "2y"
 TRAILING_WINDOW_DAYS = 10
 PRICE_RETENTION_MONTHS = 13
 
+# RS incremental recompute: re-clear and re-store the most recent N trading
+# days on every run (in addition to any dates newer than the cursor), so a
+# day left unrated by a prior low-coverage run is re-rated once its data
+# completes. Must stay small enough that every recomputed date still has
+# >=252 trading days of lookback inside the PRICE_RETENTION_MONTHS window.
+RS_RECOMPUTE_WINDOW_DAYS = 10
+
 # Split detection
 SPLIT_THRESHOLD = 0.40  # flag daily changes > 40%
 SPLIT_LOOKBACK_DAYS = 7
