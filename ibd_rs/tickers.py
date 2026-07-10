@@ -1,106 +1,194 @@
-"""Fetch and manage ticker universe from Finviz with monthly caching."""
+"""Fetch and manage the ticker universe from Finviz, guarded against truncated or blocked fetches.
+
+A truncated/blocked Finviz fetch must never silently overwrite the cached
+universe (that was the 2026-07-08 incident: 55 tickers instead of ~4,600 got
+cached for 30 days). Every fetch is validated before it is trusted; an
+untrusted fetch falls back to the last-good cache, or to a Nasdaq Trader
+derived universe if no cache exists at all -- and is reported back to the
+caller as untrusted so the daily run can signal failure.
+"""
 
 import logging
+import random
+import time
+from collections import namedtuple
 from datetime import date
 
-from finviz.screener import Screener
+from finvizfinance.screener.overview import Overview
+from finvizfinance.util import web_scrap
 
-from .config import SCREENER_FILTERS, EXCLUDED_INDUSTRIES, REFERENCE_TICKERS
+from .config import (
+    SCREENER_FILTERS,
+    EXCLUDED_INDUSTRIES,
+    REFERENCE_TICKERS,
+    CACHE_DAYS,
+    UNIVERSE_FLOOR,
+    UNIVERSE_DROP_GUARD,
+    UNIVERSE_COMPLETENESS_RATIO,
+    UNIVERSE_FETCH_RETRIES,
+)
 from . import db
+from . import nasdaq_trader
 
 logger = logging.getLogger(__name__)
 
-CACHE_DAYS = 30
+# tickers: list of {"ticker", "sector", "industry"}
+# trusted: False means this run should be treated as degraded (a fallback was served)
+# reason: human-readable explanation, always set
+UniverseResult = namedtuple("UniverseResult", ["tickers", "trusted", "reason"])
 
 
-def _resolve_filters():
-    try:
-        available = Screener.load_filter_dict()
-        valid_codes = set()
-        for category in available.values():
-            if isinstance(category, dict):
-                valid_codes.update(category.values())
+def _reported_total(foverview):
+    """Best-effort peek at Finviz's own result total for the current filter.
 
-        verified = []
-        for f in SCREENER_FILTERS:
-            if f in valid_codes:
-                verified.append(f)
-            else:
-                logger.warning("Filter code '%s' not found in Finviz. Skipping.", f)
-        return verified
-    except Exception as e:
-        logger.warning("Could not verify filters (%s), using as-is", e)
-        return list(SCREENER_FILTERS)
-
-
-def _fetch_from_finviz():
-    """Fetch filtered ticker list with sector/industry from Finviz screener.
-
-    Returns list of dicts: [{"ticker": "NVDA", "sector": "Technology", "industry": "Semiconductors"}, ...]
+    Costs one extra page request. Returns None (skip the completeness check)
+    if the page can't be parsed -- this is defense in depth, not required for
+    correct operation.
     """
-    filters = _resolve_filters()
-    logger.info("Fetching tickers from Finviz with filters: %s", filters)
-    screener = Screener(filters=filters, table="Overview")
+    try:
+        soup = web_scrap(foverview.url, foverview.request_params)
+        page_select = soup.find(id="pageSelect")
+        page_count = len(page_select.findAll("option")) if page_select else 1
+        return page_count * foverview.size
+    except Exception:
+        logger.warning("Could not determine Finviz's reported total; skipping completeness check", exc_info=True)
+        return None
 
-    data = screener.data
-    initial_count = len(data)
-    logger.info("Finviz returned %d stocks", initial_count)
+
+def _fetch_universe_attempt():
+    """One attempt to fetch the full filtered universe from Finviz.
+
+    Raises on network/parse failure. Returns (records, reported_total) where
+    records is [{"ticker", "sector", "industry"}, ...] and reported_total is
+    Finviz's own result count (or None if it couldn't be determined).
+    """
+    foverview = Overview()
+    foverview.set_filter(filters_dict=SCREENER_FILTERS)
+    reported_total = _reported_total(foverview)
+
+    df = foverview.screener_view(verbose=0)
+    if df is None:
+        raise RuntimeError("Finviz screener returned no results")
 
     filtered = []
     excluded = 0
-    for row in data:
-        industry = row.get("Industry", "").strip()
+    for _, row in df.iterrows():
+        industry = (row.get("Industry") or "").strip()
         if industry in EXCLUDED_INDUSTRIES:
             excluded += 1
-        else:
-            filtered.append({
-                "ticker": row["Ticker"],
-                "sector": row.get("Sector", "").strip() or None,
-                "industry": industry or None,
-            })
+            continue
+        filtered.append({
+            "ticker": row["Ticker"],
+            "sector": (row.get("Sector") or "").strip() or None,
+            "industry": industry or None,
+        })
     if excluded:
         logger.info("Excluded %d ETFs/SPACs by Industry filter", excluded)
 
-    # Add reference tickers
     existing = {r["ticker"] for r in filtered}
     for ref in REFERENCE_TICKERS:
         if ref not in existing:
             filtered.append({"ticker": ref, "sector": None, "industry": None})
 
     filtered.sort(key=lambda x: x["ticker"])
-    logger.info("Final ticker count: %d", len(filtered))
-    return filtered
+    return filtered, reported_total
 
 
-def fetch_ticker_list(conn=None, force_refresh=False):
-    """Get ticker list, using cached version if available and fresh.
+def _fetch_with_retries():
+    """Retry _fetch_universe_attempt with exponential backoff + jitter. Raises after exhausting retries."""
+    last_exc = None
+    for attempt in range(1, UNIVERSE_FETCH_RETRIES + 1):
+        try:
+            return _fetch_universe_attempt()
+        except Exception as e:
+            last_exc = e
+            if attempt < UNIVERSE_FETCH_RETRIES:
+                delay = (2 ** (attempt - 1)) + random.uniform(0, 1)
+                logger.warning(
+                    "Finviz fetch attempt %d/%d failed (%s); retrying in %.1fs",
+                    attempt, UNIVERSE_FETCH_RETRIES, e, delay,
+                )
+                time.sleep(delay)
+    raise last_exc
 
-    Also stores sector/industry data in the tickers table.
 
-    Returns sorted list of ticker strings.
+def _validate_universe_size(count, last_good_count, reported_total):
+    """Decide whether a fetched count is trustworthy. Returns (ok, reason)."""
+    if count < UNIVERSE_FLOOR:
+        return False, f"fetched {count} tickers, below absolute floor {UNIVERSE_FLOOR}"
+    if last_good_count and count < UNIVERSE_DROP_GUARD * last_good_count:
+        return False, (
+            f"fetched {count} tickers, below {UNIVERSE_DROP_GUARD:.0%} of "
+            f"last-good count {last_good_count}"
+        )
+    if reported_total and count < UNIVERSE_COMPLETENESS_RATIO * reported_total:
+        return False, (
+            f"fetched {count} tickers, below {UNIVERSE_COMPLETENESS_RATIO:.0%} of "
+            f"Finviz's reported total {reported_total} (likely truncated)"
+        )
+    return True, "ok"
+
+
+def _fetch_and_validate(last_good_count):
+    """Fetch (with retries) and validate. Never raises -- returns (records_or_None, trusted, reason)."""
+    try:
+        records, reported_total = _fetch_with_retries()
+    except Exception as e:
+        return None, False, f"Finviz fetch failed after {UNIVERSE_FETCH_RETRIES} attempts: {e}"
+
+    ok, reason = _validate_universe_size(len(records), last_good_count, reported_total)
+    if not ok:
+        return None, False, reason
+    return records, True, reason
+
+
+def fetch_ticker_list(conn, force_refresh=False):
+    """Get the ticker universe, preferring a fresh validated Finviz fetch.
+
+    Uses a cached universe (<= CACHE_DAYS old) unless force_refresh. On a
+    fresh fetch, stores sector/industry in the tickers table and advances the
+    cache only if the fetch is trusted (see _validate_universe_size); an
+    untrusted fetch never overwrites the cache. Falls back to the last-good
+    cache, or to a Nasdaq Trader derived universe if no cache exists.
+
+    Returns a UniverseResult. `trusted=False` means this run is degraded and
+    callers should signal failure even though a usable ticker list is
+    returned (self-healing: the pipeline keeps running on the best available
+    data rather than freezing).
     """
-    if conn and not force_refresh:
-        cached = db.get_meta(conn, "ticker_list")
-        last_fetch = db.get_meta(conn, "ticker_list_date")
-        if cached and last_fetch:
-            days_since = (date.today() - date.fromisoformat(last_fetch)).days
-            if days_since < CACHE_DAYS:
-                tickers = cached.split(",")
-                logger.info("Using cached ticker list (%d tickers, %d days old)",
-                           len(tickers), days_since)
-                return tickers
+    cached_str = db.get_meta(conn, "ticker_list")
+    cached_date = db.get_meta(conn, "ticker_list_date")
+    cached_tickers = cached_str.split(",") if cached_str else None
 
-    # Fetch fresh from Finviz
-    ticker_data = _fetch_from_finviz()
-    tickers = [t["ticker"] for t in ticker_data]
+    if cached_tickers and cached_date and not force_refresh:
+        days_since = (date.today() - date.fromisoformat(cached_date)).days
+        if days_since < CACHE_DAYS:
+            logger.info("Using cached ticker list (%d tickers, %d days old)", len(cached_tickers), days_since)
+            return UniverseResult(cached_tickers, True, "cache-fresh")
 
-    # Cache and store sector/industry
-    if conn:
+    last_good_count = len(cached_tickers) if cached_tickers else None
+    records, trusted, reason = _fetch_and_validate(last_good_count)
+
+    if trusted:
+        tickers = [r["ticker"] for r in records]
         db.set_meta(conn, "ticker_list", ",".join(tickers))
         db.set_meta(conn, "ticker_list_date", date.today().isoformat())
+        db.set_meta(conn, "last_successful_fetch", date.today().isoformat())
+        db.upsert_tickers(conn, [(r["ticker"], r["sector"], r["industry"]) for r in records])
+        logger.info("Fetched and cached %d tickers from Finviz", len(tickers))
+        return UniverseResult(tickers, True, reason)
 
-        # Upsert ticker info (sector/industry)
-        records = [(t["ticker"], t["sector"], t["industry"]) for t in ticker_data]
-        db.upsert_tickers(conn, records)
+    logger.warning("Universe fetch degraded: %s", reason)
 
-    return tickers
+    if cached_tickers:
+        return UniverseResult(
+            cached_tickers, False,
+            f"{reason}; served last-good cache ({len(cached_tickers)} tickers)",
+        )
+
+    fallback = nasdaq_trader.fetch_common_stock_tickers()
+    fallback_tickers = [r["ticker"] for r in fallback]
+    return UniverseResult(
+        fallback_tickers, False,
+        f"{reason}; no cache available, served Nasdaq Trader fallback ({len(fallback_tickers)} tickers)",
+    )

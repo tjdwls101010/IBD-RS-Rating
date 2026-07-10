@@ -20,10 +20,16 @@ PRICE_COMPLETENESS_THRESHOLD = 0.90
 # Reference tickers are included in the RS Rating population and ranked together.
 REFERENCE_TICKERS = ["SPY", "QQQ"]
 
-# Finviz screener filters
-# Note: exact filter codes verified via Screener.load_filter_dict()
-SCREENER_FILTERS = ["cap_microover"]
+# Finviz screener filters (finvizfinance filters_dict format)
+SCREENER_FILTERS = {"Market Cap.": "+Micro (over $50mln)"}
 EXCLUDED_INDUSTRIES = ["Exchange Traded Fund", "Shell Companies"]
+
+# Ticker universe caching and validation (see docs/plans/2026-07-11-neon-migration-and-reliability.md Slice 1)
+CACHE_DAYS = 7
+UNIVERSE_FLOOR = 3000  # absolute reject threshold; expected universe is ~4,600
+UNIVERSE_DROP_GUARD = 0.90  # reject if fetched < this fraction of the last-good count
+UNIVERSE_COMPLETENESS_RATIO = 0.98  # reject if fetched < this fraction of Finviz's own reported total
+UNIVERSE_FETCH_RETRIES = 4
 
 # Download settings
 BATCH_SIZE = 500

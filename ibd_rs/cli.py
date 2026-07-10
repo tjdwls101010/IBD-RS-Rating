@@ -26,8 +26,14 @@ def cmd_init(args):
     db.init_db(conn)
 
     print("Step 1/4: Fetching ticker list from Finviz...")
-    ticker_list = tickers_mod.fetch_ticker_list(conn, force_refresh=True)
-    print(f"  Found {len(ticker_list)} tickers")
+    universe = tickers_mod.fetch_ticker_list(conn, force_refresh=True)
+    print(f"  Found {len(universe.tickers)} tickers")
+    if not universe.trusted:
+        print(f"  ERROR: {universe.reason}")
+        print("  Refusing to init from an untrusted universe.")
+        conn.close()
+        raise SystemExit(1)
+    ticker_list = universe.tickers
 
     print(f"Step 2/4: Downloading 2-year price history ({len(ticker_list)} tickers)...")
     print("  This may take 20-30 minutes.")
@@ -95,8 +101,11 @@ def cmd_update(args):
     db.init_db(conn)
 
     print("Step 1/6: Fetching ticker list...")
-    ticker_list = tickers_mod.fetch_ticker_list(conn)
+    universe = tickers_mod.fetch_ticker_list(conn)
+    ticker_list = universe.tickers
     print(f"  {len(ticker_list)} tickers")
+    if not universe.trusted:
+        print(f"  WARNING: universe fetch degraded: {universe.reason}")
 
     print("Step 2/6: Downloading new price data...")
     failed = prices.download_update(ticker_list, conn)
@@ -122,11 +131,10 @@ def cmd_update(args):
     print("Step 6/6: Latest trading day completeness...")
     completeness = db.check_latest_trading_day_completeness(conn, ticker_list)
     _print_completeness_report(completeness)
-    if not completeness["is_complete"]:
-        conn.close()
-        raise SystemExit(1)
 
     conn.close()
+    if not universe.trusted or not completeness["is_complete"]:
+        raise SystemExit(1)
     print("\nUpdate complete!")
 
 

@@ -32,7 +32,7 @@ def _lock_versions():
 def test_lock_file_pins_runtime_dependencies_to_installed_versions():
     versions = _lock_versions()
 
-    for package_name in ("pandas", "yfinance", "finviz", "psycopg2-binary"):
+    for package_name in ("pandas", "yfinance", "finvizfinance", "psycopg2-binary"):
         assert package_name in versions
         assert versions[package_name] == metadata.version(package_name)
 
@@ -40,7 +40,7 @@ def test_lock_file_pins_runtime_dependencies_to_installed_versions():
 def test_locked_environment_imports_engine_and_postgres_modules():
     import_module("ibd_rs.cli")
 
-    for module_name in ("pandas", "yfinance", "finviz", "psycopg2"):
+    for module_name in ("pandas", "yfinance", "finvizfinance", "psycopg2"):
         import_module(module_name)
 
 
@@ -62,6 +62,6 @@ def test_distribution_dependencies_stay_loose():
     engine_and_pg = optional["engine"] + optional["pg"]
     assert "pandas>=2.0" in optional["engine"]
     assert "yfinance>=0.2.30" in optional["engine"]
-    assert "finviz>=2.0" in optional["engine"]
+    assert "finvizfinance>=1.3.0" in optional["engine"]
     assert "psycopg2-binary>=2.9" in optional["pg"]
     assert all("==" not in dependency for dependency in engine_and_pg)
