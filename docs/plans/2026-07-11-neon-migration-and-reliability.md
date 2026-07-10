@@ -63,7 +63,7 @@ These are agreed with the PM in the planning session. Each is an ADR-worthy deci
 
 1. **Scope: one combined effort** — reliability hardening + full Neon migration + delivery through a new PyPI release. Rationale: the database is at 95% and the recovery accelerates growth, so capacity (which the paid Neon Launch plan solves) cannot be deferred; the PM wants infrastructure consolidated on the Neon subscription they already pay for.
 2. **Migrate everything to Neon Launch** — the write database *and* the public read API. Rationale: Launch's 10 GB removes the capacity ceiling at zero marginal cost (already paid), and `pg_restore` reclaims the bloat. Neon Free would have been a lateral move (same 500 MB), but Launch is not.
-3. **Public read via Neon's Data API, anonymous `db_anon_role` path, gated on a PoC.** Rationale: it is PostgREST-compatible so the client change is minimal (drop the base URL and the anon key — the client gets *simpler* because it ships no secret), but the docs are internally contradictory and the feature is Beta, so a header-less anonymous read must be proven before committing. Do **not** use the Neon Auth sign-up/JWT path — it would force users to register and send tokens, breaking the "`pip install` and query, no signup" experience that makes the package universally usable.
+3. **Public read via Neon's Data API, anonymous `db_anon_role` path.** ~~Originally gated on proving a header-less request~~ — **superseded 2026-07-11** (see `docs/DECISIONS.md`): the Slice 0 PoC proved a truly header-less GET is rejected unconditionally by the Data API regardless of `db_anon_role`/`GRANT`/RLS config (see `docs/plans/2026-07-11-slice0-poc-results.md`). The confirmed working path — and Neon's own documented design for this use case — is the client fetching a short-lived anonymous JWT from `GET /token/anonymous` on first use, caching it in memory (~1 hour TTL), and sending it as `Authorization: Bearer` on subsequent calls. PM-approved 2026-07-11: adopt this pattern. It is still zero third-party dependencies (pure stdlib) and still requires no user signup/registration — the only change from the original ideal is one extra round trip on cold start / hourly refresh and a small amount of in-memory client state. Do **not** make users interact with Neon Auth directly (no signup flow, no user-visible tokens) — the token fetch/cache is entirely internal to the `rs_rating` client.
 4. **Beta safety net: all-in on cutover, decommission Supabase.** Once the PoC passes and the new client version ships, Supabase is retired. Rationale: the PM chose the simplest complete consolidation; the accepted cost is that installed `0.3.x` clients (which hardcode the Supabase endpoint) go stale until users upgrade, which is announced via CHANGELOG/README deprecation.
 5. **Surgical recovery, keep current dataset depth.** Recover only the frozen recent days by recomputing them; preserve the existing 13-month RS history by migrating it as-is via dump/restore. No `recalc_all`, no re-`init`. Rationale: `recalc_all`/`init` on the pruned database would destroy ~247 days of RS history (§2.3); the existing history is fine and grows forward to 2+ years within a year.
 6. **Retention unchanged: 13-month `close`, RS forever.** Rationale: this is already implemented and correct; `close` storage is already bounded, so trimming prices further yields little. The real growth driver is RS-forever (~1.16M rows/year), which Neon Launch's 10 GB absorbs for decades. Do not cut the window below 13 months — the ROC(252) term needs 252 trading days plus buffer.
@@ -82,8 +82,8 @@ The target system after this plan, described as behavior and seams (no file path
 - **RS computation.** Unchanged formula and population rules. The incremental path recomputes a small trailing window of recent trading days every run (not just dates strictly after the cursor), so a day left unrated by an earlier low-coverage run is re-rated automatically once its data completes — this is the self-healing mechanism and the recovery mechanism in one.
 - **Completeness watchdog.** Coverage is measured against an absolute expected universe (the last-good universe size or a fixed floor), not the fetched universe, so a universe collapse fails the run and fires the existing GitHub failure email.
 - **Database.** Neon Postgres (Launch plan), accessed by the daily writer over the direct (unpooled) endpoint with `sslmode=require`. Schema unchanged (`rs`, `tickers`, `meta`). The write path is plain psycopg2 `ON CONFLICT` upserts, unchanged.
-- **Public read API.** Neon Data API (PostgREST-compatible) with the anonymous `db_anon_role`. RLS enabled on `rs` and `tickers` with permissive SELECT policies; SELECT granted to the anonymous role on `rs` and `tickers` only (not `meta`). The published `rs_rating` client points at the Neon `apirest` endpoint and sends no Authorization header.
-- **Client.** `rs_rating` keeps its method surface and PostgREST-style query strings (drop-in compatible), changes its default base URL to Neon, and drops the hardcoded anon key. It retains the `url`/`key` constructor overrides for flexibility.
+- **Public read API.** Neon Data API (PostgREST-compatible) with the anonymous `db_anon_role`. RLS enabled on `rs` and `tickers` with permissive SELECT policies; SELECT granted to the anonymous role on `rs` and `tickers` only (not `meta`). The published `rs_rating` client points at the Neon `apirest` endpoint and, on first use, fetches a short-lived anonymous JWT from `GET /token/anonymous` (no auth needed for that call either), caches it in memory, and sends it as `Authorization: Bearer` on every query, refreshing automatically when it expires (~1 hour TTL, confirmed empirically in the Slice 0 PoC).
+- **Client.** `rs_rating` keeps its method surface and PostgREST-style query strings (drop-in compatible), changes its default base URL to Neon, and drops the hardcoded Supabase anon key in favor of the in-memory-cached anonymous JWT described above. It retains the `url`/`key` constructor overrides for flexibility.
 
 ---
 
@@ -91,19 +91,22 @@ The target system after this plan, described as behavior and seams (no file path
 
 Each slice is one GitHub issue and one branch/PR. `AFK` = an agent can finish autonomously; `HITL` = needs human judgment or touches production. Behavioral scenarios use Given/When/Then; the *Then* is the acceptance criterion. All engine tests must be offline and deterministic (mock yfinance/finviz/HTTP at the boundary), matching the existing 83-test suite.
 
-### Slice 0 — Neon project + Data API anonymous-read PoC (HITL, gate)
+### Slice 0 — Neon project + Data API anonymous-read PoC (HITL, gate) — DONE 2026-07-11
 
 **Context.** Everything in the read-path migration depends on whether Neon's Beta Data API can serve a header-less anonymous read. This slice proves it before any cutover work, so a failed assumption costs a PoC rather than a broken public client. Blocked by: none — do this first.
 
-**What to build.** Create/confirm the Neon Launch project and a working branch. Get both connection strings (direct and pooled). On a throwaway table, enable the Data API, set `db_anon_role = anonymous`, `GRANT SELECT` to `anonymous`, enable RLS with a permissive SELECT policy, and issue a GET from pure-stdlib `urllib` with **no** Authorization header. Confirm rows return.
+**What was built.** Confirmed the existing Neon Launch project (`IBD-RS-RATING`, id `withered-cherry-36264108`). On throwaway tables on its `production` branch, enabled the Data API, set `db_anon_role = anonymous`, `GRANT SELECT` to `anonymous` on one table only, enabled RLS with a permissive SELECT policy, and issued GETs from pure-stdlib `urllib`/`curl` both with and without an Authorization header.
 
-**Behavioral scenarios.**
-- **Given** a Neon table with RLS + SELECT granted to the anonymous role, **When** a stdlib `urllib` GET with no Authorization header hits `https://<ep>.apirest.<region>.aws.neon.tech/<db>/rest/v1/<table>?...`, **Then** the expected rows return as PostgREST-style JSON.
-- **Given** a table without the anonymous SELECT grant, **When** the same anonymous GET runs, **Then** it returns no rows / is rejected (confirming the grant is what exposes data, not a misconfiguration).
+**Result — gate triggered, then resolved.** A truly header-less GET is rejected unconditionally ("missing authentication credentials"), independent of grants and independent of whether an auth provider is configured — full evidence in `docs/plans/2026-07-11-slice0-poc-results.md`. The only working anonymous path is `GET /token/anonymous` → cache the returned JWT (~1hr TTL) → send as `Authorization: Bearer`, which is Neon's own documented intended design, not a workaround. This is exactly the pattern the original Gate below said not to ship, so implementation stopped and the PM was re-grilled per `AGENTS.md` Grilling Returns. **PM decision (2026-07-11, recorded in `docs/DECISIONS.md`): adopt the token-fetch-and-cache pattern.** Still zero third-party dependencies, still no user signup. See the updated Decision 3 in §3 and the updated Slice 6 below.
 
-**Gate.** If header-less anonymous read does not work, STOP and re-grill the PM: options are (a) keep Supabase for reads only (needs Neon→Supabase sync — reopens Decision 4), (b) a tiny serverless read proxy over Neon, (c) delay the read cutover until the Data API is GA. Do not ship a per-request `/token/anonymous` fetch — it breaks the zero-dependency client.
+**Behavioral scenarios (as actually verified).**
+- **Given** a Neon table with RLS + SELECT granted to the anonymous role, **When** a header-less GET hits `/rest/v1/<table>`, **Then** it is rejected with "missing authentication credentials" (not the originally hypothesized pass-through).
+- **Given** the same table, **When** a GET carries `Authorization: Bearer <token>` fetched from `/token/anonymous`, **Then** the expected rows return as PostgREST-style JSON.
+- **Given** a table without the anonymous SELECT grant, **When** the same Bearer-token GET runs, **Then** it is rejected with a permission-denied error (confirming the grant, not the token, is what gates data access).
 
-**Out of scope.** Any client code change; any production data.
+**Original gate (for history).** If header-less anonymous read does not work, STOP and re-grill the PM: options were (a) keep Supabase for reads only, (b) a tiny serverless read proxy over Neon, (c) delay the read cutover until the Data API is GA, (d) adopt the token-fetch-and-cache pattern despite the original concern. **(d) was chosen.**
+
+**Out of scope.** Any client code change (deferred to Slice 6); any production data (none touched — project schema was empty at PoC time).
 
 ### Slice 1 — Universe acquisition hardening (AFK, offline TDD)
 
@@ -182,16 +185,18 @@ Each slice is one GitHub issue and one branch/PR. `AFK` = an agent can finish au
 
 ### Slice 6 — Public read cutover to Neon Data API + client (HITL then AFK)
 
-**Context.** Moves the public read layer to Neon and retires Supabase. Blocked by: Slice 0 (PoC passed), Slice 5 (fresh data on Neon).
+**Context.** Moves the public read layer to Neon and retires Supabase. Blocked by: Slice 0 (PoC done — token-fetch-and-cache pattern confirmed and PM-approved), Slice 5 (fresh data on Neon).
 
-**What to build.** On Neon: enable the Data API, enable RLS on `rs` and `tickers` with permissive SELECT policies, and `GRANT SELECT` to the anonymous role on `rs` and `tickers` only (not `meta` — fixes the §2.3 leak). Update the `rs_rating` client default base URL to the Neon `apirest` endpoint and drop the hardcoded anon key and apikey header (header-less). Keep the `url`/`key` overrides. Update the client tests (response shape is identical PostgREST JSON; adjust `test_default_credentials`). After the client cutover verifies, decommission Supabase.
+**What to build.** On Neon: enable the Data API, enable RLS on `rs` and `tickers` with permissive SELECT policies, and `GRANT SELECT` to the anonymous role on `rs` and `tickers` only (not `meta` — fixes the §2.3 leak). Update the `rs_rating` client default base URL to the Neon `apirest` endpoint. Drop the hardcoded Supabase anon key. Add an in-memory token cache: on first request needing auth, `GET /token/anonymous` from the Neon Auth base URL (no auth needed for that call), cache the returned JWT and its `exp`, send it as `Authorization: Bearer` on every `/rest/v1/*` call, and transparently re-fetch when the cached token is expired or absent. Keep the `url`/`key` overrides — `key`, if provided, should still be sendable as a Bearer token directly (bypassing the fetch/cache) for callers who want to supply their own credential. Update the client tests (response shape is identical PostgREST JSON; adjust `test_default_credentials` to cover the token-fetch-and-cache path, including an expiry/refresh test with a mocked clock).
 
 **Behavioral scenarios.**
-- **Given** the Neon Data API with anonymous SELECT on `rs`/`tickers`, **When** the updated client calls `get`/`top`/`history`/`sectors` with no token, **Then** it returns the same shapes the Supabase client returned.
+- **Given** the Neon Data API with anonymous SELECT on `rs`/`tickers`, **When** the updated client calls `get`/`top`/`history`/`sectors` with no caller-supplied token, **Then** it transparently fetches and caches an anonymous token and returns the same shapes the Supabase client returned.
+- **Given** a client instance that already has a cached, unexpired anonymous token, **When** a second query runs, **Then** no new `/token/anonymous` call is made (the cached token is reused).
+- **Given** a client instance whose cached token has expired, **When** the next query runs, **Then** a fresh token is fetched and cached before the query proceeds.
 - **Given** the anonymous role, **When** it attempts to read `meta`, **Then** it is denied (leak fixed).
-- **Given** the existing client method surface, **When** the endpoint swaps to Neon, **Then** all public methods work unchanged (drop-in query compatibility).
+- **Given** the existing client method surface, **When** the endpoint swaps to Neon, **Then** all public methods work unchanged aside from the internal auth handling (drop-in query compatibility).
 
-**Out of scope.** Expanding the client's API surface (future). Keeping Supabase as a mirror (Decision 4 retires it).
+**Out of scope.** Expanding the client's API surface (future). Keeping Supabase as a mirror (Decision 4 retires it). Persisting the cached token to disk (in-memory per process instance only).
 
 ### Slice 7 — End-to-end verification (HITL)
 
@@ -232,7 +237,7 @@ Each slice is one GitHub issue and one branch/PR. `AFK` = an agent can finish au
 
 The reliability code (Slices 1–3) is database-agnostic and offline-testable, so it can be developed first with fast feedback. The recovery is time-sensitive (backfill window ~2026-07-18) and must run on Neon (to dodge the 500 MB landmine), so migration precedes recovery. Recommended order:
 
-1. **Slice 0** (Neon PoC gate) — do first; the read-path plan hinges on it.
+1. **Slice 0** (Neon PoC gate) — DONE 2026-07-11; result and PM decision recorded above and in `docs/DECISIONS.md`.
 2. **Slice 1, 2, 3** (reliability hardening) — offline TDD, parallelizable; Slice 1 and 2 are prerequisites for a clean recovery.
 3. **Slice 4** (migrate DB to Neon).
 4. **Slice 5** (surgical recovery on Neon) — as soon as 1, 2, 4 are done; time-sensitive.
@@ -259,7 +264,7 @@ Preserve the existing 83 offline/deterministic tests as regression protection; a
 ## 8. Release & deployment procedure
 
 1. Land Slices 1–3 (hardening) on branches/PRs with green offline tests.
-2. Run Slice 0 PoC; only proceed with the read cutover if it passes.
+2. Slice 0 PoC done — result required a PM decision (token-fetch-and-cache adopted); proceed to the read cutover using that pattern.
 3. Migrate the database (Slice 4) and update the `DATABASE_URL` secret to Neon (direct, `sslmode=require`).
 4. Recover data on Neon (Slice 5) within the backfill window; verify against the fingerprint.
 5. Cut over reads and the client (Slice 6); verify; decommission Supabase.
@@ -271,7 +276,8 @@ Preserve the existing 83 offline/deterministic tests as regression protection; a
 
 ## 9. Risks & mitigations
 
-- **Neon Data API is Beta and could change or break** → gate on the Slice 0 PoC; keep the write pipeline decoupled from the read layer; the client retains `url`/`key` overrides so the endpoint can be repointed; announce the version/endpoint change clearly.
+- **Neon Data API is Beta and could change or break** → gated on the Slice 0 PoC (done 2026-07-11); keep the write pipeline decoupled from the read layer; the client retains `url`/`key` overrides so the endpoint can be repointed; announce the version/endpoint change clearly.
+- **The anonymous token's ~1 hour TTL means a long-lived client instance needs working refresh logic, and `/token/anonymous` is itself part of the Beta surface** → covered by the Slice 6 expiry/refresh test; if `/token/anonymous` changes shape, only the client's internal token-fetch function needs updating (the public method surface is unaffected).
 - **`recalc_all`/`init` destroys RS history** → forbidden in recovery; recovery is surgical (Slice 5); this document flags it in §0, §2.3, and §5.
 - **Recovery misses the backfill window** → prioritize Slices 0/1/2/4/5; if missed, accept 1-day holes (pipeline still recovers forward).
 - **Finviz blocks the GitHub Actions IP again** → the guards make this a red run with last-good fallback rather than a silent freeze; residential-proxy/non-datacenter runner is a documented follow-up if blocking becomes frequent.

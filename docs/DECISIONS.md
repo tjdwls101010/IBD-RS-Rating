@@ -2,6 +2,10 @@
 
 Newest first. Each entry: `## YYYY-MM-DD — short title`, then 1–3 sentences (context + decision + why).
 
+## 2026-07-11 — Neon 익명 읽기: 완전 무헤더 대신 토큰 캐싱 패턴 채택 (Decision 3 수정)
+
+Neon 이전 계획(docs/plans/2026-07-11-neon-migration-and-reliability.md)의 Decision 3은 Supabase의 정적 anon key처럼 "완전 무헤더" 익명 읽기를 가정했으나, Slice 0 PoC(docs/plans/2026-07-11-slice0-poc-results.md)에서 Neon Data API는 GRANT/RLS 설정과 무관하게 Authorization 헤더 없는 요청을 전부 거부함을 실측으로 확인했다. 유일하게 동작하는 경로는 Neon이 공식 설계한 "첫 호출 시 GET /token/anonymous로 단명 토큰(1시간)을 받아 메모리에 캐싱 후 Bearer로 재사용"이며, 이는 여전히 순정 stdlib만 사용하고 사용자 회원가입도 없어 zero-dependency 원칙은 유지된다. PM 승인으로 이 패턴을 채택 — Decision 4(Neon 전체 이전, Supabase 폐기)는 그대로 유효하며, Slice 6(읽기 전환) 구현 시 클라이언트에 토큰 캐싱 로직을 추가한다.
+
 ## 2026-06-07 — 다운로드를 고정 트레일링 윈도우로 재설계
 
 정체의 근원은 download_update가 전체 테이블의 글로벌 MAX(date)를 모든 종목 공통 start로 쓴 것이다(일부 종목이 앞서면 나머지가 영구히 굶음). 매 거래일 모든 종목에 "최근 N거래일(7~10일)"을 일괄 재요청·upsert하는 방식으로 바꾼다 — 부분 실패가 다음 실행에서 자동 치유되어 정체가 구조적으로 불가능해진다. 종목별 워터마크는 가장 정확하나 호출량이 폭증해 rate-limit 위험이 커서 배제. 대규모 과거 공백은 일회성 재구축으로 메운다.
