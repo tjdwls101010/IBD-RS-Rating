@@ -1,19 +1,30 @@
 """IBD-style Relative Strength Rating client.
 
-Uses Supabase REST API (PostgREST) to query pre-calculated RS ratings.
+Uses the Neon Data API (PostgREST) to query pre-calculated RS ratings.
 Zero external dependencies -- uses only the Python standard library.
+
+Neon's Data API requires a bearer token on every request; there is no
+truly header-less anonymous path (see docs/DECISIONS.md, 2026-07-11). This
+client fetches a short-lived anonymous token on first use, caches it in
+memory, and transparently refreshes it before it expires (tokens are valid
+for 1 hour).
 """
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+# Refresh the cached token this many seconds before its actual expiry, to
+# avoid racing a request against an expiry that lands mid-flight.
+_TOKEN_REFRESH_MARGIN_SECONDS = 60
 
 
 class RS:
     """IBD-style Relative Strength Rating client.
 
-    Uses Supabase REST API to query pre-calculated RS ratings
+    Uses the Neon Data API to query pre-calculated RS ratings
     for ~4600 US stocks, updated daily.
 
     Example::
@@ -24,22 +35,25 @@ class RS:
         {'ticker': 'NVDA', 'date': '2026-03-19', 'rs_raw': 0.1666, 'rs_rating': 70}
     """
 
-    # Default public Supabase endpoint (read-only via RLS)
-    DEFAULT_URL = "https://qgoytloruyjtyasypesv.supabase.co"
-    DEFAULT_KEY = (
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-        "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFnb3l0bG9ydXlqdHlhc3lwZXN2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5MzExNjgsImV4cCI6MjA4OTUwNzE2OH0."
-        "OjnyBGly1Xyqcb0GIk9wymoLrnsocUoodWkazt1_HyQ"
-    )
+    # Default public Neon Data API endpoint (anonymous read-only via RLS)
+    DEFAULT_URL = "https://ep-shiny-bread-ato0bxsg.apirest.c-9.us-east-1.aws.neon.tech/neondb/rest/v1"
+    DEFAULT_AUTH_URL = "https://ep-shiny-bread-ato0bxsg.neonauth.c-9.us-east-1.aws.neon.tech/neondb/auth"
 
-    def __init__(self, url=None, key=None):
-        self.url = (url or self.DEFAULT_URL).rstrip("/")
-        self.key = key or self.DEFAULT_KEY
-        self._base = f"{self.url}/rest/v1"
-        self._headers = {
-            "apikey": self.key,
-            "Authorization": f"Bearer {self.key}",
-        }
+    def __init__(self, url=None, auth_url=None):
+        self._base = (url or self.DEFAULT_URL).rstrip("/")
+        self._auth_base = (auth_url or self.DEFAULT_AUTH_URL).rstrip("/")
+        self._token = None
+        self._token_expires_at = 0
+
+    def _get_token(self):
+        """Return a valid anonymous bearer token, fetching/refreshing as needed."""
+        if self._token is None or time.time() >= self._token_expires_at - _TOKEN_REFRESH_MARGIN_SECONDS:
+            req = urllib.request.Request(f"{self._auth_base}/token/anonymous")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+            self._token = data["token"]
+            self._token_expires_at = data["expires_at"]
+        return self._token
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -513,16 +527,16 @@ class RS:
         return latest[0]["date"] if latest else None
 
     def _request(self, table, params):
-        """Make a GET request to the Supabase REST API."""
+        """Make a GET request to the Neon Data API."""
         query = urllib.parse.urlencode(params)
         url = f"{self._base}/{table}?{query}"
 
-        req = urllib.request.Request(url, headers=self._headers)
         try:
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self._get_token()}"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             body = e.read().decode()
-            raise RuntimeError(f"Supabase API error {e.code}: {body}") from e
+            raise RuntimeError(f"Neon Data API error {e.code}: {body}") from e
         except urllib.error.URLError as e:
-            raise ConnectionError(f"Failed to connect to Supabase: {e}") from e
+            raise ConnectionError(f"Failed to connect to the Neon Data API: {e}") from e

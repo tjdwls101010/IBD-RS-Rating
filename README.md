@@ -18,7 +18,7 @@ The only open-source project that provides **true percentile-ranked RS Ratings (
 
 </div>
 
-![](https://github.com/tjdwls101010/DUMOK/blob/main/Images/forest-gump.png?raw=true)
+![](https://raw.githubusercontent.com/tjdwls101010/tjdwls101010/refs/heads/main/Images/forest-gump.png)
 
 ---
 
@@ -117,9 +117,9 @@ rs.sector_top("Energy", 10)            # Top 10 energy stocks
 
 ## API Reference
 
-### `RS(url=None, key=None)`
+### `RS(url=None, auth_url=None)`
 
-Create a client instance. No arguments needed — connects to the public API by default.
+Create a client instance. No arguments needed — connects to the public Neon-backed API by default, fetching and caching a short-lived anonymous token automatically.
 
 ### `.get(ticker, date=None) → dict | None`
 
@@ -277,7 +277,7 @@ yfinance → Daily close prices (2 years history)
        ↓
 RS calculation → Vectorized pandas computation
        ↓
-Supabase PostgreSQL → Stored & served via REST API
+Neon PostgreSQL → Stored & served via REST API
        ↓
 GitHub Actions → Automated daily update (weekdays, after market close)
 ```
@@ -297,7 +297,7 @@ GitHub Actions → Automated daily update (weekdays, after market close)
 Want to run your own instance? The calculation engine is included.
 
 ```bash
-git clone https://github.com/your-username/IBD-RS-Rating.git
+git clone https://github.com/tjdwls101010/IBD-RS-Rating.git
 cd IBD-RS-Rating
 pip install -e ".[pg]"
 
@@ -306,9 +306,9 @@ python -m ibd_rs init      # Download 2yr data + calculate RS (~30 min)
 python -m ibd_rs update    # Daily update (~3 min)
 python -m ibd_rs top 20    # View top stocks
 
-# Cloud mode (Supabase)
+# Cloud mode (Neon or any Postgres)
 export DATABASE_URL="postgresql://..."
-python -m ibd_rs init      # Loads data into Supabase
+python -m ibd_rs init      # Loads data into your Postgres database
 ```
 
 ### CLI Commands

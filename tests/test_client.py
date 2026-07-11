@@ -4,11 +4,17 @@ All HTTP calls are mocked so the test suite runs offline and fast.
 """
 
 import json
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from rs_rating import RS
+from rs_rating.client import _TOKEN_REFRESH_MARGIN_SECONDS
+
+# Captured before any test monkeypatches RS._get_token, so token-specific
+# tests can restore the real implementation.
+_ORIGINAL_GET_TOKEN = RS._get_token
 
 
 # ------------------------------------------------------------------
@@ -22,6 +28,16 @@ def mock_response(data, status=200):
     resp.__enter__ = MagicMock(return_value=resp)
     resp.__exit__ = MagicMock(return_value=False)
     return resp
+
+
+@pytest.fixture(autouse=True)
+def _stub_token(monkeypatch):
+    """Every test in this file exercises data methods, not the token
+    round-trip itself -- stub it out so existing single/multi-call
+    urlopen mocks don't also need to account for a token fetch.
+    Token-caching behavior itself is tested separately below, where the
+    real implementation is restored."""
+    monkeypatch.setattr(RS, "_get_token", lambda self: "test-token")
 
 
 # ------------------------------------------------------------------
@@ -190,21 +206,21 @@ def test_reference(mock_urlopen):
 
 
 @patch("urllib.request.urlopen")
-def test_custom_url_and_key(mock_urlopen):
+def test_custom_url_and_auth_url(mock_urlopen):
     mock_urlopen.return_value = mock_response([
         {"ticker": "TSLA", "date": "2026-03-19", "rs_raw": 0.50, "rs_rating": 85}
     ])
-    rs = RS(url="https://custom.supabase.co", key="custom-key")
-    assert rs.url == "https://custom.supabase.co"
-    assert rs.key == "custom-key"
+    rs = RS(url="https://custom.example.com/rest/v1", auth_url="https://custom.example.com/auth")
+    assert rs._base == "https://custom.example.com/rest/v1"
+    assert rs._auth_base == "https://custom.example.com/auth"
     result = rs.get("TSLA")
     assert result["ticker"] == "TSLA"
 
 
-def test_default_credentials():
+def test_default_endpoints():
     rs = RS()
-    assert "supabase.co" in rs.url
-    assert rs.key.startswith("eyJ")
+    assert "neon.tech" in rs._base
+    assert "neon.tech" in rs._auth_base
 
 
 @patch("urllib.request.urlopen")
@@ -220,7 +236,7 @@ def test_http_error(mock_urlopen):
     )
     mock_urlopen.side_effect = error
     rs = RS()
-    with pytest.raises(RuntimeError, match="Supabase API error 400"):
+    with pytest.raises(RuntimeError, match="Neon Data API error 400"):
         rs.get("NVDA")
 
 
@@ -398,4 +414,56 @@ def test_industry_top(mock_urlopen):
 
 def test_version():
     import rs_rating
-    assert rs_rating.__version__ == "0.3.0"
+    assert rs_rating.__version__ == "0.4.0"
+
+
+# ------------------------------------------------------------------
+# Token caching (real _get_token restored; urlopen mocked directly)
+# ------------------------------------------------------------------
+
+def test_token_is_fetched_and_sent_as_bearer_auth(monkeypatch):
+    monkeypatch.setattr(RS, "_get_token", _ORIGINAL_GET_TOKEN)
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.side_effect = [
+            mock_response({"token": "abc123", "expires_at": time.time() + 3600}),
+            mock_response([{"ticker": "NVDA", "date": "2026-03-19", "rs_raw": 0.17, "rs_rating": 70}]),
+        ]
+        rs = RS()
+        result = rs.get("NVDA")
+
+    assert result["ticker"] == "NVDA"
+    token_call, data_call = mock_urlopen.call_args_list
+    assert "/token/anonymous" in token_call.args[0].full_url
+    assert data_call.args[0].headers["Authorization"] == "Bearer abc123"
+
+
+def test_token_is_cached_across_multiple_requests(monkeypatch):
+    monkeypatch.setattr(RS, "_get_token", _ORIGINAL_GET_TOKEN)
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.side_effect = [
+            mock_response({"token": "abc123", "expires_at": time.time() + 3600}),
+            mock_response([{"ticker": "NVDA", "rs_rating": 70}]),
+            mock_response([{"ticker": "AAPL", "rs_rating": 80}]),
+        ]
+        rs = RS()
+        rs.get("NVDA")
+        rs.get("AAPL")
+
+    token_calls = [c for c in mock_urlopen.call_args_list if "/token/anonymous" in c.args[0].full_url]
+    assert len(token_calls) == 1
+
+
+def test_token_is_refreshed_once_near_expiry(monkeypatch):
+    monkeypatch.setattr(RS, "_get_token", _ORIGINAL_GET_TOKEN)
+    rs = RS()
+    rs._token = "stale-token"
+    rs._token_expires_at = time.time() + _TOKEN_REFRESH_MARGIN_SECONDS - 1  # inside the refresh margin
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.side_effect = [
+            mock_response({"token": "fresh-token", "expires_at": time.time() + 3600}),
+            mock_response([{"ticker": "NVDA", "rs_rating": 70}]),
+        ]
+        rs.get("NVDA")
+
+    assert rs._token == "fresh-token"
