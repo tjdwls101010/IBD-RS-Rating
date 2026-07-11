@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0] - 2026-07-11
+
+### Changed
+- **Breaking:** the public read client (`rs_rating.RS`) is now backed by Neon instead of Supabase. Supabase stopped receiving new data on 2026-07-11 and will be decommissioned.
+- **Breaking:** `RS(url=None, key=None)` → `RS(url=None, auth_url=None)`. Neon issues short-lived anonymous tokens automatically; there's no static key for callers to supply. The client fetches and caches a token per session, refreshing it before it expires.
+- Engine's write database migrated from Supabase to Neon (serverless Postgres) — smaller footprint after bloat reclamation, and connection keepalives for long-running batch jobs.
+
+### Fixed
+- Ticker-universe completeness check compared the post-filter ticker count against Finviz's raw page total, causing false-positive "truncated" rejections and unnecessary fallback to a lower-quality ticker source.
+- A dropped database connection mid-write could crash the whole `update` run; price-download batches now fail and retry independently instead.
+- `update` could crash if Neon's serverless compute auto-suspended during the ticker-list fetch (a multi-minute Finviz scrape with no DB activity); the client now detects and transparently reconnects.
+- Self-healing RS recompute window widened from 10 to 15 trading days, reducing the chance that a cohort of tickers crossing the 252-trading-day history minimum around the same time has a date permanently skipped once the cursor moves past it.
+
 ## [0.3.1] - 2026-06-08
 
 ### Fixed
