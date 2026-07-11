@@ -82,7 +82,7 @@ def test_good_fetch_is_cached_and_advances_timestamp(monkeypatch, conn):
         lambda: (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR),
     )
 
-    result = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.fetch_ticker_list(conn)
 
     assert result.trusted is True
     assert len(result.tickers) == UNIVERSE_FLOOR
@@ -101,7 +101,7 @@ def test_truncated_fetch_is_rejected_and_serves_last_good(monkeypatch, conn):
     # Reproduces the 2026-07-08 incident: Finviz returns 55 tickers.
     monkeypatch.setattr(tickers, "_fetch_with_retries", lambda: (_records(55), 55, 4600))
 
-    result = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.fetch_ticker_list(conn)
 
     assert result.trusted is False
     assert "floor" in result.reason
@@ -120,7 +120,7 @@ def test_fetch_failure_after_retries_serves_last_good(monkeypatch, conn):
 
     monkeypatch.setattr(tickers, "_fetch_with_retries", always_fail)
 
-    result = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.fetch_ticker_list(conn)
 
     assert result.trusted is False
     assert "blocked" in result.reason
@@ -138,7 +138,7 @@ def test_fetch_failure_with_no_cache_falls_back_to_nasdaq_trader(monkeypatch, co
         lambda: [{"ticker": "AAPL", "sector": None, "industry": None}],
     )
 
-    result = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.fetch_ticker_list(conn)
 
     assert result.trusted is False
     assert "Nasdaq Trader fallback" in result.reason
@@ -158,10 +158,36 @@ def test_partial_fetch_below_completeness_ratio_is_rejected_as_truncated(monkeyp
 
     monkeypatch.setattr(tickers, "_fetch_with_retries", lambda: (_records(4000), 4000, 4600))
 
-    result = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.fetch_ticker_list(conn)
 
     assert result.trusted is False
     assert "reported total" in result.reason
+
+
+def test_trusted_fetch_uses_reconnected_connection_for_post_fetch_writes(monkeypatch, conn):
+    """db.reconnect's own dead/alive detection is unit-tested in test_db.py;
+    this verifies fetch_ticker_list calls it after the slow Finviz fetch and
+    writes results through whatever connection it returns -- guarding
+    against Neon's serverless auto-suspend killing the session during the
+    multi-minute screener scrape (observed: "SSL connection has been closed
+    unexpectedly" right as results were about to be cached)."""
+    fresh_conn = db.get_connection(":memory:")
+    db.init_db(fresh_conn)
+    monkeypatch.setattr(db, "reconnect", lambda c: fresh_conn)
+    monkeypatch.setattr(
+        tickers, "_fetch_with_retries",
+        lambda: (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR),
+    )
+
+    result, returned_conn = tickers.fetch_ticker_list(conn)
+
+    assert result.trusted is True
+    assert len(result.tickers) == UNIVERSE_FLOOR
+    assert returned_conn is fresh_conn
+    # writes landed on the reconnected connection...
+    assert len(db.get_meta(fresh_conn, "ticker_list").split(",")) == UNIVERSE_FLOOR
+    # ...not on the original (possibly-dead) one
+    assert db.get_meta(conn, "ticker_list") is None
 
 
 def test_fresh_cache_is_reused_without_a_new_fetch(monkeypatch, conn):
@@ -174,7 +200,7 @@ def test_fresh_cache_is_reused_without_a_new_fetch(monkeypatch, conn):
 
     monkeypatch.setattr(tickers, "_fetch_with_retries", fail_if_called)
 
-    result = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.fetch_ticker_list(conn)
 
     assert result.trusted is True
     assert result.tickers == ["AAPL", "MSFT"]
@@ -190,7 +216,7 @@ def test_force_refresh_bypasses_a_fresh_cache(monkeypatch, conn):
         lambda: (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR),
     )
 
-    result = tickers.fetch_ticker_list(conn, force_refresh=True)
+    result, conn = tickers.fetch_ticker_list(conn, force_refresh=True)
 
     assert result.trusted is True
     assert len(result.tickers) == UNIVERSE_FLOOR

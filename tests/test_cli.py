@@ -24,7 +24,7 @@ def test_cmd_update_prunes_old_close_once_after_rs_calculation(monkeypatch, caps
     monkeypatch.setattr(
         cli.tickers_mod,
         "fetch_ticker_list",
-        lambda passed_conn: calls.append("tickers") or UniverseResult(["AAPL"], True, "ok"),
+        lambda passed_conn: calls.append("tickers") or (UniverseResult(["AAPL"], True, "ok"), passed_conn),
     )
     monkeypatch.setattr(
         cli.prices,
@@ -84,7 +84,7 @@ def test_cmd_update_exits_1_when_latest_day_completeness_fails(monkeypatch, caps
     monkeypatch.setattr(cli.db, "get_connection", lambda: conn)
     monkeypatch.setattr(
         cli.tickers_mod, "fetch_ticker_list",
-        lambda passed_conn: UniverseResult(universe, True, "ok"),
+        lambda passed_conn: (UniverseResult(universe, True, "ok"), passed_conn),
     )
     monkeypatch.setattr(cli.prices, "download_update", lambda tickers, passed_conn: {})
     monkeypatch.setattr(cli.splits, "detect_anomalous_changes", lambda passed_conn: [])
@@ -112,7 +112,7 @@ def test_cmd_update_exits_1_when_universe_fetch_is_degraded(monkeypatch, capsys)
     monkeypatch.setattr(cli.db, "get_connection", lambda: conn)
     monkeypatch.setattr(
         cli.tickers_mod, "fetch_ticker_list",
-        lambda passed_conn: UniverseResult(universe, False, "fetched 55 tickers, below absolute floor 3000"),
+        lambda passed_conn: (UniverseResult(universe, False, "fetched 55 tickers, below absolute floor 3000"), passed_conn),
     )
     monkeypatch.setattr(cli.prices, "download_update", lambda tickers, passed_conn: {})
     monkeypatch.setattr(cli.splits, "detect_anomalous_changes", lambda passed_conn: [])
@@ -135,7 +135,7 @@ def test_cmd_init_refuses_to_run_on_an_untrusted_universe(monkeypatch, capsys, t
     monkeypatch.setattr(cli, "DATA_DIR", tmp_path)
     monkeypatch.setattr(
         cli.tickers_mod, "fetch_ticker_list",
-        lambda passed_conn, force_refresh: UniverseResult(["T0"], False, "fetched 55 tickers, below absolute floor 3000"),
+        lambda passed_conn, force_refresh: (UniverseResult(["T0"], False, "fetched 55 tickers, below absolute floor 3000"), passed_conn),
     )
 
     with pytest.raises(SystemExit) as exc:

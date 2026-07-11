@@ -15,6 +15,24 @@ def conn():
     c.close()
 
 
+def test_reconnect_returns_same_connection_when_alive(conn):
+    assert db.reconnect(conn) is conn
+
+
+def test_reconnect_returns_a_fresh_connection_when_dead(monkeypatch):
+    class DeadConn:
+        def cursor(self):
+            raise Exception("SSL connection has been closed unexpectedly")
+
+        def close(self):
+            pass
+
+    fresh_conn = db.get_connection(":memory:")
+    monkeypatch.setattr(db, "get_connection", lambda *a, **kw: fresh_conn)
+
+    assert db.reconnect(DeadConn()) is fresh_conn
+
+
 def _set_retention_now(monkeypatch):
     fixed_now = datetime(2026, 6, 8)
 

@@ -45,8 +45,10 @@ PRICE_RETENTION_MONTHS = 13
 # days on every run (in addition to any dates newer than the cursor), so a
 # day left unrated by a prior low-coverage run is re-rated once its data
 # completes. Must stay small enough that every recomputed date still has
-# >=252 trading days of lookback inside the PRICE_RETENTION_MONTHS window.
-RS_RECOMPUTE_WINDOW_DAYS = 10
+# >=252 trading days of lookback inside the PRICE_RETENTION_MONTHS window
+# (see test_recompute_window_leaves_enough_lookback_margin_in_retention_window;
+# the hard ceiling under current settings is 21 trading days).
+RS_RECOMPUTE_WINDOW_DAYS = 15
 
 # Split detection
 SPLIT_THRESHOLD = 0.40  # flag daily changes > 40%

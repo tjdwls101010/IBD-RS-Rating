@@ -165,10 +165,15 @@ def fetch_ticker_list(conn, force_refresh=False):
     untrusted fetch never overwrites the cache. Falls back to the last-good
     cache, or to a Nasdaq Trader derived universe if no cache exists.
 
-    Returns a UniverseResult. `trusted=False` means this run is degraded and
-    callers should signal failure even though a usable ticker list is
-    returned (self-healing: the pipeline keeps running on the best available
-    data rather than freezing).
+    Returns (UniverseResult, conn). The connection is returned because a slow
+    Finviz fetch (multi-minute screener scrape) can outlive Neon's serverless
+    auto-suspend; if the original connection died in the gap, this transparently
+    reconnects before writing results, and callers must use the returned
+    connection for anything after this call.
+
+    `trusted=False` means this run is degraded and callers should signal
+    failure even though a usable ticker list is returned (self-healing: the
+    pipeline keeps running on the best available data rather than freezing).
     """
     cached_str = db.get_meta(conn, "ticker_list")
     cached_date = db.get_meta(conn, "ticker_list_date")
@@ -178,10 +183,11 @@ def fetch_ticker_list(conn, force_refresh=False):
         days_since = (date.today() - date.fromisoformat(cached_date)).days
         if days_since < CACHE_DAYS:
             logger.info("Using cached ticker list (%d tickers, %d days old)", len(cached_tickers), days_since)
-            return UniverseResult(cached_tickers, True, "cache-fresh")
+            return UniverseResult(cached_tickers, True, "cache-fresh"), conn
 
     last_good_count = len(cached_tickers) if cached_tickers else None
     records, trusted, reason = _fetch_and_validate(last_good_count)
+    conn = db.reconnect(conn)
 
     if trusted:
         tickers = [r["ticker"] for r in records]
@@ -190,7 +196,7 @@ def fetch_ticker_list(conn, force_refresh=False):
         db.set_meta(conn, "last_successful_fetch", date.today().isoformat())
         db.upsert_tickers(conn, [(r["ticker"], r["sector"], r["industry"]) for r in records])
         logger.info("Fetched and cached %d tickers from Finviz", len(tickers))
-        return UniverseResult(tickers, True, reason)
+        return UniverseResult(tickers, True, reason), conn
 
     logger.warning("Universe fetch degraded: %s", reason)
 
@@ -198,11 +204,11 @@ def fetch_ticker_list(conn, force_refresh=False):
         return UniverseResult(
             cached_tickers, False,
             f"{reason}; served last-good cache ({len(cached_tickers)} tickers)",
-        )
+        ), conn
 
     fallback = nasdaq_trader.fetch_common_stock_tickers()
     fallback_tickers = [r["ticker"] for r in fallback]
     return UniverseResult(
         fallback_tickers, False,
         f"{reason}; no cache available, served Nasdaq Trader fallback ({len(fallback_tickers)} tickers)",
-    )
+    ), conn
