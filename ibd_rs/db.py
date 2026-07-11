@@ -80,7 +80,17 @@ def _cursor(conn):
 def get_connection(db_path=None):
     if DATABASE_URL and db_path is None:
         import psycopg2
-        conn = psycopg2.connect(DATABASE_URL)
+        # TCP keepalives: a batch download run can leave the connection idle
+        # for tens of seconds between writes, long enough for a proxy/load
+        # balancer in the path to silently drop it (observed as "SSL
+        # connection has been closed unexpectedly" mid-pipeline).
+        conn = psycopg2.connect(
+            DATABASE_URL,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
+        )
         conn.autocommit = False
         return conn
 
