@@ -112,6 +112,29 @@ def _record_missing_tickers(all_failed, requested_tickers, close_df):
     return missing
 
 
+def _store_batch(conn, tickers_batch, close_df, all_failed, batch_num, label):
+    """Upsert a batch's close prices. A DB write failure (e.g. a dropped
+    connection mid-run) marks the whole batch failed instead of crashing the
+    run, mirroring the existing download-failure handling, and rolls back so
+    a merely-aborted transaction doesn't also poison the next batch."""
+    if close_df.empty:
+        return
+    records = _to_records(close_df)
+    if not records:
+        return
+    try:
+        db.upsert_prices(conn, records)
+        logger.info("%s batch %d: stored %d records", label, batch_num, len(records))
+    except Exception as e:
+        logger.error("%s batch %d failed to store: %s", label, batch_num, e)
+        for t in tickers_batch:
+            all_failed[t] = str(e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
 def download_initial(tickers, conn):
     """Download 2 years of price history for all tickers.
 
@@ -140,11 +163,7 @@ def download_initial(tickers, conn):
         if missing:
             logger.warning("Batch %d missing data for %d tickers", batch_num, len(missing))
 
-        if not close_df.empty:
-            records = _to_records(close_df)
-            if records:
-                db.upsert_prices(conn, records)
-                logger.info("Batch %d: stored %d records", batch_num, len(records))
+        _store_batch(conn, batch, close_df, all_failed, batch_num, "Initial")
 
         time.sleep(INTER_BATCH_SLEEP_SECONDS)
 
@@ -184,10 +203,7 @@ def download_update(tickers, conn):
         if missing:
             logger.warning("Update batch %d missing data for %d tickers", batch_num, len(missing))
 
-        if not close_df.empty:
-            records = _to_records(close_df)
-            if records:
-                db.upsert_prices(conn, records)
+        _store_batch(conn, batch, close_df, all_failed, batch_num, "Update")
 
         time.sleep(INTER_BATCH_SLEEP_SECONDS)
 

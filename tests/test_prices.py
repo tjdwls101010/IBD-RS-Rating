@@ -357,6 +357,35 @@ def test_download_update_marks_whole_batch_failed_when_download_raises(monkeypat
     assert _newer_price_count(conn) == 0
 
 
+def test_download_update_recovers_from_a_db_write_failure_on_one_batch(monkeypatch, conn):
+    """A transient DB error while storing one batch (e.g. a dropped
+    connection) must not crash the whole run: that batch's tickers are
+    recorded as failed, and the next batch still gets stored."""
+    batch1 = [f"T{i}" for i in range(prices.BATCH_SIZE)]
+    batch2 = ["U0", "U1"]
+
+    monkeypatch.setattr(
+        prices, "_download_batch",
+        lambda tickers, **kwargs: _price_frame({t: [10.0, 11.0] for t in tickers}),
+    )
+
+    real_upsert = db.upsert_prices
+    calls = {"n": 0}
+
+    def flaky_upsert(passed_conn, records):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("SSL connection has been closed unexpectedly")
+        return real_upsert(passed_conn, records)
+
+    monkeypatch.setattr(prices.db, "upsert_prices", flaky_upsert)
+
+    failed = prices.download_update(batch1 + batch2, conn)
+
+    assert set(failed) == set(batch1)
+    assert _stored_tickers(conn) == sorted(batch2)
+
+
 def test_download_update_marks_empty_dataframe_as_all_failed(monkeypatch, conn):
     db.upsert_prices(conn, [("A", "2000-01-01", 9.0)])
     monkeypatch.setattr(prices, "_download_batch", lambda tickers, **kwargs: pd.DataFrame())

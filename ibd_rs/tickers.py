@@ -58,9 +58,14 @@ def _reported_total(foverview):
 def _fetch_universe_attempt():
     """One attempt to fetch the full filtered universe from Finviz.
 
-    Raises on network/parse failure. Returns (records, reported_total) where
-    records is [{"ticker", "sector", "industry"}, ...] and reported_total is
-    Finviz's own result count (or None if it couldn't be determined).
+    Raises on network/parse failure. Returns (records, raw_count,
+    reported_total): records is [{"ticker", "sector", "industry"}, ...];
+    raw_count is the row count Finviz actually returned, before our own
+    EXCLUDED_INDUSTRIES filtering or reference-ticker addition; reported_total
+    is Finviz's own claimed result count for the filter (or None if it
+    couldn't be determined). raw_count and reported_total are compared
+    against each other for truncation detection -- both are pre-filter, so
+    the comparison isn't skewed by how many rows we choose to exclude.
     """
     foverview = Overview()
     foverview.set_filter(filters_dict=SCREENER_FILTERS)
@@ -69,6 +74,7 @@ def _fetch_universe_attempt():
     df = foverview.screener_view(verbose=0)
     if df is None:
         raise RuntimeError("Finviz screener returned no results")
+    raw_count = len(df)
 
     filtered = []
     excluded = 0
@@ -91,7 +97,7 @@ def _fetch_universe_attempt():
             filtered.append({"ticker": ref, "sector": None, "industry": None})
 
     filtered.sort(key=lambda x: x["ticker"])
-    return filtered, reported_total
+    return filtered, raw_count, reported_total
 
 
 def _fetch_with_retries():
@@ -112,8 +118,16 @@ def _fetch_with_retries():
     raise last_exc
 
 
-def _validate_universe_size(count, last_good_count, reported_total):
-    """Decide whether a fetched count is trustworthy. Returns (ok, reason)."""
+def _validate_universe_size(count, last_good_count, raw_count, reported_total):
+    """Decide whether a fetched count is trustworthy. Returns (ok, reason).
+
+    `count` (our final, filtered + reference-tickers-added universe) is
+    checked against the absolute floor and the last-good drop-guard.
+    `raw_count` (Finviz's row count before our own filtering) is checked
+    against `reported_total` (Finviz's own claimed total) for truncation --
+    comparing raw to raw avoids the systematic gap that our own
+    EXCLUDED_INDUSTRIES filtering would otherwise introduce.
+    """
     if count < UNIVERSE_FLOOR:
         return False, f"fetched {count} tickers, below absolute floor {UNIVERSE_FLOOR}"
     if last_good_count and count < UNIVERSE_DROP_GUARD * last_good_count:
@@ -121,9 +135,9 @@ def _validate_universe_size(count, last_good_count, reported_total):
             f"fetched {count} tickers, below {UNIVERSE_DROP_GUARD:.0%} of "
             f"last-good count {last_good_count}"
         )
-    if reported_total and count < UNIVERSE_COMPLETENESS_RATIO * reported_total:
+    if reported_total and raw_count < UNIVERSE_COMPLETENESS_RATIO * reported_total:
         return False, (
-            f"fetched {count} tickers, below {UNIVERSE_COMPLETENESS_RATIO:.0%} of "
+            f"fetched {raw_count} raw rows, below {UNIVERSE_COMPLETENESS_RATIO:.0%} of "
             f"Finviz's reported total {reported_total} (likely truncated)"
         )
     return True, "ok"
@@ -132,11 +146,11 @@ def _validate_universe_size(count, last_good_count, reported_total):
 def _fetch_and_validate(last_good_count):
     """Fetch (with retries) and validate. Never raises -- returns (records_or_None, trusted, reason)."""
     try:
-        records, reported_total = _fetch_with_retries()
+        records, raw_count, reported_total = _fetch_with_retries()
     except Exception as e:
         return None, False, f"Finviz fetch failed after {UNIVERSE_FETCH_RETRIES} attempts: {e}"
 
-    ok, reason = _validate_universe_size(len(records), last_good_count, reported_total)
+    ok, reason = _validate_universe_size(len(records), last_good_count, raw_count, reported_total)
     if not ok:
         return None, False, reason
     return records, True, reason

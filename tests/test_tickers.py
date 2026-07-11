@@ -27,42 +27,60 @@ def _no_sleep(monkeypatch):
 # --- _validate_universe_size: pure logic, no mocking needed ---
 
 def test_validate_rejects_below_absolute_floor():
-    ok, reason = tickers._validate_universe_size(UNIVERSE_FLOOR - 1, None, None)
+    ok, reason = tickers._validate_universe_size(UNIVERSE_FLOOR - 1, None, None, None)
     assert ok is False
     assert "floor" in reason
 
 
 def test_validate_accepts_at_or_above_floor_with_no_baseline():
-    ok, reason = tickers._validate_universe_size(UNIVERSE_FLOOR, None, None)
+    ok, reason = tickers._validate_universe_size(UNIVERSE_FLOOR, None, None, None)
     assert ok is True
 
 
 def test_validate_rejects_drop_below_90pct_of_last_good():
-    ok, reason = tickers._validate_universe_size(4000, last_good_count=4600, reported_total=None)
+    ok, reason = tickers._validate_universe_size(4000, last_good_count=4600, raw_count=None, reported_total=None)
     assert ok is False
     assert "last-good" in reason
 
 
 def test_validate_accepts_small_drop_within_90pct_of_last_good():
-    ok, reason = tickers._validate_universe_size(4200, last_good_count=4600, reported_total=None)
+    ok, reason = tickers._validate_universe_size(4200, last_good_count=4600, raw_count=None, reported_total=None)
     assert ok is True
 
 
 def test_validate_rejects_below_98pct_of_reported_total():
-    ok, reason = tickers._validate_universe_size(4000, last_good_count=None, reported_total=4600)
+    # raw_count (pre-filter) is what's compared against reported_total, not
+    # the final filtered count -- see test_fetch_universe_attempt_* below for
+    # why comparing the filtered count would be a false-positive-truncation bug.
+    ok, reason = tickers._validate_universe_size(4000, last_good_count=None, raw_count=4000, reported_total=4600)
     assert ok is False
     assert "reported total" in reason
 
 
 def test_validate_accepts_within_98pct_of_reported_total():
-    ok, reason = tickers._validate_universe_size(4550, last_good_count=None, reported_total=4600)
+    ok, reason = tickers._validate_universe_size(4550, last_good_count=None, raw_count=4550, reported_total=4600)
+    assert ok is True
+
+
+def test_validate_uses_raw_count_not_filtered_count_for_completeness_check():
+    """Reproduces a real production false-positive: Finviz fully returned all
+    matching rows (raw_count 4955 of a reported 4960 = 99.9% complete), but
+    after our own EXCLUDED_INDUSTRIES filtering the final count (4658) alone
+    would look like only 93.9% -- comparing the final count against
+    reported_total would wrongly reject a complete fetch as truncated."""
+    ok, reason = tickers._validate_universe_size(
+        4658, last_good_count=None, raw_count=4955, reported_total=4960,
+    )
     assert ok is True
 
 
 # --- fetch_ticker_list orchestration: mock at the _fetch_with_retries seam ---
 
 def test_good_fetch_is_cached_and_advances_timestamp(monkeypatch, conn):
-    monkeypatch.setattr(tickers, "_fetch_with_retries", lambda: (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR))
+    monkeypatch.setattr(
+        tickers, "_fetch_with_retries",
+        lambda: (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR),
+    )
 
     result = tickers.fetch_ticker_list(conn)
 
@@ -81,7 +99,7 @@ def test_truncated_fetch_is_rejected_and_serves_last_good(monkeypatch, conn):
     db.set_meta(conn, "ticker_list_date", "2000-01-01")
 
     # Reproduces the 2026-07-08 incident: Finviz returns 55 tickers.
-    monkeypatch.setattr(tickers, "_fetch_with_retries", lambda: (_records(55), 4600))
+    monkeypatch.setattr(tickers, "_fetch_with_retries", lambda: (_records(55), 55, 4600))
 
     result = tickers.fetch_ticker_list(conn)
 
@@ -132,12 +150,13 @@ def test_partial_fetch_below_completeness_ratio_is_rejected_as_truncated(monkeyp
     # A modest last-good baseline means the 90% drop-guard alone would pass
     # a 4000-ticker fetch, but Finviz itself reports 4600 are available --
     # a plausible-looking but truncated fetch that only the completeness
-    # cross-check against Finviz's own total catches.
+    # cross-check against Finviz's own total catches. raw_count == the final
+    # count here since no exclusions are simulated at this orchestration level.
     good = _records(3000, prefix="G")
     db.set_meta(conn, "ticker_list", ",".join(r["ticker"] for r in good))
     db.set_meta(conn, "ticker_list_date", "2000-01-01")
 
-    monkeypatch.setattr(tickers, "_fetch_with_retries", lambda: (_records(4000), 4600))
+    monkeypatch.setattr(tickers, "_fetch_with_retries", lambda: (_records(4000), 4000, 4600))
 
     result = tickers.fetch_ticker_list(conn)
 
@@ -166,7 +185,10 @@ def test_force_refresh_bypasses_a_fresh_cache(monkeypatch, conn):
     from datetime import date
     db.set_meta(conn, "ticker_list_date", date.today().isoformat())
 
-    monkeypatch.setattr(tickers, "_fetch_with_retries", lambda: (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR))
+    monkeypatch.setattr(
+        tickers, "_fetch_with_retries",
+        lambda: (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR),
+    )
 
     result = tickers.fetch_ticker_list(conn, force_refresh=True)
 
@@ -200,12 +222,31 @@ def test_fetch_universe_attempt_excludes_etfs_and_adds_reference_tickers(monkeyp
     monkeypatch.setattr(tickers, "Overview", lambda: _FakeOverview(df))
     monkeypatch.setattr(tickers, "_reported_total", lambda foverview: 3)
 
-    records, reported_total = tickers._fetch_universe_attempt()
+    records, raw_count, reported_total = tickers._fetch_universe_attempt()
 
     tickers_out = {r["ticker"] for r in records}
     assert tickers_out == {"AAPL", "MSFT", "SPY", "QQQ"}  # FAKE excluded; reference tickers added
+    assert raw_count == 3  # the raw Finviz row count, before exclusion/reference-addition
     assert reported_total == 3
     assert records == sorted(records, key=lambda r: r["ticker"])
+
+
+def test_fetch_universe_attempt_raw_count_is_unaffected_by_exclusions(monkeypatch):
+    """raw_count must reflect what Finviz returned, not our post-filter
+    count -- this is the exact distinction that fixes the false-positive
+    truncation bug (see test_validate_uses_raw_count_not_filtered_count)."""
+    df = pd.DataFrame([
+        {"Ticker": "AAPL", "Sector": "Technology", "Industry": "Consumer Electronics"},
+        {"Ticker": "ETF1", "Sector": "", "Industry": "Exchange Traded Fund"},
+        {"Ticker": "ETF2", "Sector": "", "Industry": "Exchange Traded Fund"},
+    ])
+    monkeypatch.setattr(tickers, "Overview", lambda: _FakeOverview(df))
+    monkeypatch.setattr(tickers, "_reported_total", lambda foverview: 3)
+
+    records, raw_count, reported_total = tickers._fetch_universe_attempt()
+
+    assert raw_count == 3  # all 3 raw rows, including the 2 excluded ETFs
+    assert {r["ticker"] for r in records} == {"AAPL", "SPY", "QQQ"}  # only 1 + 2 references
 
 
 def test_fetch_universe_attempt_raises_when_screener_returns_none(monkeypatch):
@@ -226,11 +267,11 @@ def test_fetch_with_retries_recovers_after_transient_failures(monkeypatch):
         calls["n"] += 1
         if calls["n"] < 3:
             raise RuntimeError("rate limited")
-        return (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR)
+        return (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR)
 
     monkeypatch.setattr(tickers, "_fetch_universe_attempt", flaky)
 
-    records, reported_total = tickers._fetch_with_retries()
+    records, raw_count, reported_total = tickers._fetch_with_retries()
 
     assert calls["n"] == 3
     assert len(records) == UNIVERSE_FLOOR
