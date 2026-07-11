@@ -26,7 +26,7 @@ def cmd_init(args):
     db.init_db(conn)
 
     print("Step 1/4: Fetching ticker list from Finviz...")
-    universe = tickers_mod.fetch_ticker_list(conn, force_refresh=True)
+    universe, conn = tickers_mod.fetch_ticker_list(conn, force_refresh=True)
     print(f"  Found {len(universe.tickers)} tickers")
     if not universe.trusted:
         print(f"  ERROR: {universe.reason}")
@@ -101,7 +101,7 @@ def cmd_update(args):
     db.init_db(conn)
 
     print("Step 1/6: Fetching ticker list...")
-    universe = tickers_mod.fetch_ticker_list(conn)
+    universe, conn = tickers_mod.fetch_ticker_list(conn)
     ticker_list = universe.tickers
     print(f"  {len(ticker_list)} tickers")
     if not universe.trusted:

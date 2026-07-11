@@ -101,6 +101,29 @@ def get_connection(db_path=None):
     return conn
 
 
+def reconnect(conn):
+    """Return a live connection: the same one if it still answers a query,
+    otherwise a fresh one from get_connection().
+
+    Guards against long network-bound gaps (e.g. Finviz's multi-minute
+    screener scrape) outliving Neon's serverless auto-suspend, which tears
+    down the session server-side ("SSL connection has been closed
+    unexpectedly") even though TCP keepalives kept the socket itself open.
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
+        return conn
+    except Exception:
+        logger.warning("Connection appears dead; reconnecting", exc_info=True)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return get_connection()
+
+
 # --- Schema ---
 
 def init_db(conn):
