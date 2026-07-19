@@ -1,48 +1,54 @@
-<div align="center">
+<p align="center">
+  <img src="https://github.com/tjdwls101010/tjdwls101010/blob/main/Images/IBD%20RS%20Rating.png?raw=true" width="640" alt="IBD RS Rating">
+</p>
 
-<img src="https://investors.com/wp-content/themes/ibd/dist/images/ibd-placeholder.png" width="120" alt="RS Rating">
+<h1 align="center">IBD RS Rating</h1>
 
-# IBD-Style Relative Strength Rating
+<p align="center">
+  <strong>Percentile-ranked relative strength ratings (1&ndash;99) for ~4,600 US stocks, recalculated every trading day.</strong>
+</p>
 
-**Unofficial IBD-style RS Rating for 4,600+ US stocks, updated daily.**
+<p align="center">
+  <a href="https://pypi.org/project/ibd-rs-rating/"><img src="https://img.shields.io/pypi/v/ibd-rs-rating" alt="PyPI"></a>
+  <a href="https://pypi.org/project/ibd-rs-rating/"><img src="https://img.shields.io/pypi/pyversions/ibd-rs-rating" alt="Python versions"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/pypi/l/ibd-rs-rating" alt="License: MIT"></a>
+  <a href="https://github.com/tjdwls101010/IBD-RS-Rating/actions/workflows/daily_update.yml"><img src="https://github.com/tjdwls101010/IBD-RS-Rating/actions/workflows/daily_update.yml/badge.svg" alt="Daily RS Update"></a>
+</p>
 
-The only open-source project that provides **true percentile-ranked RS Ratings (1-99)** — not just weighted returns.
-
-[![PyPI](https://img.shields.io/pypi/v/ibd-rs-rating)](https://pypi.org/project/ibd-rs-rating/)
-[![Daily Update](https://img.shields.io/badge/updated-daily-brightgreen)](#)
-[![Stocks](https://img.shields.io/badge/stocks-4%2C600%2B-blue)](#)
-[![Python](https://img.shields.io/badge/python-3.10%2B-yellow)](#)
-[![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#)
-
-[Installation](#installation) · [Quick Start](#quick-start) · [API Reference](#api-reference) · [How It Works](#how-it-works)
-
-</div>
-
-![](https://raw.githubusercontent.com/tjdwls101010/tjdwls101010/refs/heads/main/Images/forest-gump.png)
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="docs/wiki/README.md">Documentation</a> ·
+  <a href="docs/wiki/API-Reference.md">API reference</a> ·
+  <a href="docs/wiki/Concepts.md">How it works</a>
+</p>
 
 ---
 
-## Why This Project?
+## What this is
 
-IBD's Relative Strength (RS) Rating is one of the most powerful tools for momentum investing — used by William O'Neil, Mark Minervini, and thousands of growth investors. **But IBD doesn't provide it for free**, and existing open-source alternatives only calculate weighted returns without the crucial **percentile ranking** step.
+Relative Strength (RS) Rating answers one question: **over the past year, did this stock outperform more of the market than that one?** A stock rated 90 outpaced 90% of the roughly 4,600 stocks it was measured against. A stock rated 50 was average. It is the metric William O'Neil built a strategy around, and it is the first filter most momentum investors apply.
 
-**This project solves that.** We calculate true RS Ratings (1-99) for 4,600+ US stocks daily:
+Investor's Business Daily publishes RS Ratings behind a paid subscription. Open-source alternatives usually stop halfway — they compute a weighted return and call it a rating, skipping the step that gives the number meaning. **A weighted return tells you a stock rose 18%. A rating tells you that 18% put it in the top 3% of the market.** Only the second one is comparable across stocks, across sectors, and across time.
 
-- **RS 99** = outperforming 99% of all stocks over the past year
-- **RS 50** = median performer
-- **RS 1** = bottom 1%
+This project does the full computation: it collects daily closes for the whole US common-stock universe, computes each stock's weighted momentum score, and then ranks every score against every other score on that same trading day to produce a 1–99 rating.
 
 ```python
 from rs_rating import RS
 
 rs = RS()
 rs.get("NVDA")
-# {'ticker': 'NVDA', 'date': '2026-03-19', 'rs_raw': 0.1666, 'rs_rating': 70}
+# {'ticker': 'NVDA', 'date': '2026-03-19', 'close': 121.4, 'rs_raw': 0.1666, 'rs_rating': 70}
 ```
 
-No API key needed. No rate limits. Just `pip install` and go.
+No account, no API key, no rate limit. The reading client is pure Python standard library — installing it pulls in nothing else.
 
----
+## Highlights
+
+- **True percentile ranking.** Every rating is a stock's position within the full universe on that date, not a rescaled return.
+- **Zero-dependency client.** `rs_rating` uses only `urllib` and `json`, so it drops into any environment without dependency conflicts.
+- **Sector and industry analysis.** Rank sectors by average RS, or find the strongest names inside one industry — O'Neil's research attributes roughly half of a stock's move to its industry group.
+- **Honest gaps.** A stock with under 252 trading days of history gets no rating rather than a rating built on thin data, and a trading day whose coverage falls below 90% of the universe is left unrated rather than published with a distorted denominator.
+- **Self-hostable.** The full calculation engine ships in the same repository. Point it at SQLite for a laptop or any Postgres for production.
 
 ## Installation
 
@@ -50,302 +56,101 @@ No API key needed. No rate limits. Just `pip install` and go.
 pip install ibd-rs-rating
 ```
 
-**Zero dependencies** — uses only Python standard library (`urllib`, `json`).
+Requires Python 3.10 or newer.
 
----
-
-## Quick Start
+## Quick start
 
 ```python
 from rs_rating import RS
 
 rs = RS()
 
-# Get latest RS Rating for a stock
+# One stock, latest rating
 rs.get("AAPL")
-# {'ticker': 'AAPL', 'date': '2026-03-19', 'rs_raw': 0.2841, 'rs_rating': 72}
 
-# Get RS Rating for a specific date
-rs.get("AAPL", date="2026-03-01")
-
-# Top 10 stocks by RS Rating
+# The strongest names in the market right now
 rs.top(10)
-# [{'ticker': 'MU', 'rs_rating': 99, 'rs_raw': 1.99}, ...]
 
-# RS Rating history (last 30 days)
-rs.history("NVDA")
-# [{'date': '2026-03-19', 'rs_raw': 0.17, 'rs_rating': 70}, ...]
-
-# Compare multiple stocks
-rs.compare(["NVDA", "AMD", "AVGO", "INTC"])
-# [{'ticker': 'AVGO', 'rs_rating': 85}, {'ticker': 'NVDA', 'rs_rating': 70}, ...]
-
-# Filter: stocks with RS ≥ 90
+# Everything in the top decile
 rs.filter(min_rating=90)
-# Returns all stocks in the top 10%
 
-# SPY & QQQ benchmark RS (raw score, not ranked)
-rs.reference()
-# [{'ticker': 'SPY', 'rs_raw': 0.049}, {'ticker': 'QQQ', 'rs_raw': 0.063}]
+# Head-to-head
+rs.compare(["NVDA", "AMD", "AVGO", "INTC"])
 
-# Stocks with biggest RS Rating improvement (last 5 trading days)
+# Momentum that is accelerating: biggest rating gains over 5 trading days
 rs.movers(days=5, n=10)
-# [{'ticker': 'XYZ', 'rs_rating': 85, 'prev_rating': 60, 'change': 25}, ...]
 
-# Biggest RS losers
-rs.movers(days=5, n=10, direction="down")
-
-# Available date range
-rs.dates()
-# {'first': '2025-03-21', 'last': '2026-03-19'}
-
-# Sector & Industry analysis
-rs.sector_ranking()                    # Which sectors are strongest?
-rs.industry_top("Semiconductors", 5)   # Top 5 semiconductor stocks
-rs.sector_top("Energy", 10)            # Top 10 energy stocks
-```
-
----
-
-## Available Stocks
-
-**4,600+ US-listed stocks** are tracked and updated daily. See the full list with current RS ratings:
-
-**[`data/tickers.csv`](data/tickers.csv)**
-
----
-
-## API Reference
-
-### `RS(url=None, auth_url=None)`
-
-Create a client instance. No arguments needed — connects to the public Neon-backed API by default, fetching and caching a short-lived anonymous token automatically.
-
-### `.get(ticker, date=None) → dict | None`
-
-Get RS rating for a single ticker. Returns latest if no date specified.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `ticker` | str | Stock symbol (case-insensitive) |
-| `date` | str | Optional. `"YYYY-MM-DD"` format |
-
-### `.history(ticker, start=None, end=None, days=30) → list`
-
-Get RS rating history for a ticker.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `ticker` | str | Stock symbol |
-| `start` | str | Start date `"YYYY-MM-DD"` |
-| `end` | str | End date `"YYYY-MM-DD"` |
-| `days` | int | Recent days (default: 30, ignored if start is set) |
-
-### `.top(n=20, date=None) → list`
-
-Get top N stocks ranked by RS Rating.
-
-### `.bottom(n=20, date=None) → list`
-
-Get bottom N stocks ranked by RS Rating.
-
-### `.filter(min_rating=None, max_rating=None, date=None) → list`
-
-Filter stocks by RS Rating range.
-
-```python
-# Stocks with RS between 80 and 95
-rs.filter(min_rating=80, max_rating=95)
-```
-
-### `.compare(tickers, date=None) → list`
-
-Compare RS ratings for a list of tickers, sorted by rating descending.
-
-```python
-rs.compare(["AAPL", "MSFT", "GOOG", "AMZN", "META"])
-```
-
-### `.reference(date=None) → list`
-
-Get RS raw scores for benchmark indices (SPY, QQQ). These are not percentile-ranked — they provide a baseline to compare individual stocks against the market.
-
-### `.movers(days=5, n=20, direction="up") → list`
-
-Get stocks with the biggest RS Rating change over recent trading days. Perfect for finding emerging momentum leaders.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `days` | int | Lookback period in trading days (default: 5) |
-| `n` | int | Number of results (default: 20) |
-| `direction` | str | `"up"` for gainers, `"down"` for losers |
-
-```python
-rs.movers(days=5, n=10, direction="up")
-# [{'ticker': 'XYZ', 'rs_rating': 85, 'prev_rating': 60, 'change': 25}, ...]
-```
-
-### `.dates() → dict`
-
-Get the available date range for RS data.
-
-```python
-rs.dates()
-# {'first': '2025-03-21', 'last': '2026-03-19'}
-```
-
-### `.sectors() → list`
-
-List all available sectors.
-
-### `.industries(sector=None) → list`
-
-List all available industries, optionally filtered by sector.
-
-```python
-rs.industries("Technology")
-# ['Communication Equipment', 'Computer Hardware', 'Consumer Electronics', ...]
-```
-
-### `.sector_ranking(date=None) → list`
-
-Rank sectors by average RS Rating. Shows which sectors have the strongest momentum.
-
-```python
+# Which sectors are leading?
 rs.sector_ranking()
-# [{'sector': 'Energy', 'avg_rs': 78.7, 'count': 210}, ...]
 ```
 
-### `.industry_ranking(date=None, sector=None) → list`
+Every call returns plain dicts and lists — no custom types to learn, and the output drops straight into `pandas.DataFrame(...)` if you want it there.
 
-Rank industries by average RS Rating. O'Neil's research shows ~50% of a stock's move is driven by its industry group.
+The first call fetches a short-lived anonymous access token and caches it for the session, so there is nothing to configure. See [Getting Started](docs/wiki/Getting-Started.md) for a full walkthrough and [API Reference](docs/wiki/API-Reference.md) for all 15 methods.
 
-```python
-rs.industry_ranking()
-# [{'industry': 'Oil & Gas Drilling', 'sector': 'Energy', 'avg_rs': 92.0, 'count': 15}, ...]
-```
-
-### `.sector_top(sector, n=20, date=None) → list`
-
-Get top N stocks within a specific sector.
-
-```python
-rs.sector_top("Technology", n=5)
-# [{'ticker': 'AXTI', 'rs_rating': 99, 'rs_raw': 14.79, 'industry': 'Semiconductor Equipment'}, ...]
-```
-
-### `.industry_top(industry, n=20, date=None) → list`
-
-Get top N stocks within a specific industry.
-
-```python
-rs.industry_top("Semiconductors", n=5)
-# [{'ticker': 'MU', 'rs_rating': 98, 'rs_raw': 1.99}, ...]
-```
-
----
-
-## How It Works
-
-### The Formula
-
-RS Rating follows IBD's reverse-engineered methodology:
+## How a rating is built
 
 ```
 RS Raw = 0.4 × ROC(63) + 0.2 × ROC(126) + 0.2 × ROC(189) + 0.2 × ROC(252)
 ```
 
-Where `ROC(n)` = cumulative price return over the last `n` trading days.
+`ROC(n)` is the return over that stock's last `n` **valid trading days**. The most recent quarter carries five times the weight of the oldest, which is what makes the score respond to accelerating momentum rather than to a rally that ended nine months ago.
 
-This gives **5x more weight to the most recent quarter** compared to the oldest quarter — designed to catch stocks with accelerating momentum.
+That raw score is then percentile-ranked against every other stock rated on the same date and scaled to 1–99. The ranking step is what turns a private number into a comparable one. [Concepts](docs/wiki/Concepts.md) explains each term; [Architecture](docs/wiki/Architecture.md) explains how the pipeline produces them.
 
-| Quarter | Effective Weight |
-|---------|-----------------|
-| Most recent (0-3 months) | 100% |
-| 2nd quarter (3-6 months) | 60% |
-| 3rd quarter (6-9 months) | 40% |
-| Oldest (9-12 months) | 20% |
+## Data universe
 
-The raw score is then **percentile-ranked across all ~4,600 stocks** to produce a rating from 1 to 99.
+Roughly 4,600 US-listed common stocks (NYSE, NASDAQ, AMEX) with a market cap above $50M, excluding ETFs and shell companies, including ADRs. SPY and QQQ are tracked and ranked alongside individual stocks so you can see where the index itself falls in the distribution.
 
-### Data Pipeline
+A snapshot of the latest ratings is committed to [`data/tickers.csv`](data/tickers.csv).
 
-```
-Finviz Screener → Ticker list (~4,600 stocks)
-       ↓
-yfinance → Daily close prices (2 years history)
-       ↓
-RS calculation → Vectorized pandas computation
-       ↓
-Neon PostgreSQL → Stored & served via REST API
-       ↓
-GitHub Actions → Automated daily update (weekdays, after market close)
-```
+## Self-hosting
 
-### Universe
-
-- **~4,600 US-listed stocks** (NYSE, NASDAQ, AMEX)
-- Market cap > $50M (micro-cap and above)
-- Excludes ETFs and shell companies (SPACs)
-- Includes ADRs (BABA, TSM, etc.)
-- SPY & QQQ tracked as reference benchmarks
-
----
-
-## Self-Hosting
-
-Want to run your own instance? The calculation engine is included.
+The engine that produces the data is in the same repository, and it runs on your own database:
 
 ```bash
 git clone https://github.com/tjdwls101010/IBD-RS-Rating.git
 cd IBD-RS-Rating
-pip install -e ".[pg]"
+pip install -e ".[engine,pg]"
 
-# Local mode (SQLite)
-python -m ibd_rs init      # Download 2yr data + calculate RS (~30 min)
-python -m ibd_rs update    # Daily update (~3 min)
-python -m ibd_rs top 20    # View top stocks
-
-# Cloud mode (Neon or any Postgres)
-export DATABASE_URL="postgresql://..."
-python -m ibd_rs init      # Loads data into your Postgres database
+python -m ibd_rs init      # download 2y of history and compute RS (20-30 min)
+python -m ibd_rs update    # daily incremental update (~3 min)
+python -m ibd_rs top 20    # inspect results
 ```
 
-### CLI Commands
+Without `DATABASE_URL` set, everything runs against a local SQLite file. Set it to any Postgres connection string to use that instead. [Operations](docs/wiki/Operations.md) covers running it as a scheduled job.
 
-| Command | Description |
-|---------|-------------|
-| `python -m ibd_rs init` | Initial setup: download data + compute RS |
-| `python -m ibd_rs update` | Daily update: new prices + RS recalc |
-| `python -m ibd_rs top [N]` | Top N stocks by RS Rating |
-| `python -m ibd_rs lookup TICKER` | RS history for a ticker |
-| `python -m ibd_rs status` | Database statistics |
-| `python -m ibd_rs export` | Export to CSV |
+## Documentation
 
----
+Full documentation lives in **[`docs/wiki/`](docs/wiki/README.md)**:
 
-## Accuracy
+| Page | What it covers |
+|---|---|
+| [Overview](docs/wiki/Overview.md) | The problem, the approach, who it's for, what it deliberately doesn't do |
+| [Getting Started](docs/wiki/Getting-Started.md) | First working result, both as a library user and as a self-hoster |
+| [Concepts](docs/wiki/Concepts.md) | RS Raw, RS Rating, universe, warm-up, trailing window |
+| [Architecture](docs/wiki/Architecture.md) | Components, data flow, schema, design decisions and why |
+| [Data Pipeline](docs/wiki/Data-Pipeline.md) | Ticker sourcing, price download, split repair, retention |
+| [API Reference](docs/wiki/API-Reference.md) | All 15 client methods with parameters and return shapes |
+| [CLI Reference](docs/wiki/CLI-Reference.md) | Every `ibd-rs` command and its behaviour |
+| [Operations](docs/wiki/Operations.md) | Self-hosting, scheduling, reliability guards, monitoring |
+| [Troubleshooting](docs/wiki/Troubleshooting.md) | Symptoms mapped to causes and fixes |
+| [FAQ](docs/wiki/FAQ.md) | Accuracy vs. real IBD, missing ratings, and other recurring questions |
 
-Compared against actual IBD MarketSmith RS Ratings:
+## Project status
 
-| Range | Accuracy | Notes |
-|-------|----------|-------|
-| RS 90+ | ±1-3 points | Near-exact match for top performers |
-| RS 60-90 | ±5-10 points | Systematic offset due to universe size difference |
-| RS < 30 | ±3-6 points | Both agree stock is weak |
+Beta, maintained by one person. The public data pipeline runs automatically on weekdays and the client API is stable — the last breaking change was the 0.4.0 backend migration, recorded in [CHANGELOG.md](CHANGELOG.md). Treat the hosted endpoint as best-effort: if you depend on this data operationally, self-host.
 
-**Ranking order is consistent** — the same stocks appear at the top. The absolute values may differ slightly because IBD's exact formula and universe are proprietary.
+## Contributing
 
----
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the test commands. To report a security issue, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
 
 ## Disclaimer
 
-This project is **not affiliated with Investor's Business Daily (IBD)** or William O'Neil + Co. RS Ratings are calculated using a reverse-engineered approximation of IBD's methodology. For official ratings, subscribe to [IBD MarketSmith](https://marketsmith.investors.com/).
+Not affiliated with Investor's Business Daily or William O'Neil + Co. RS Ratings here are a reverse-engineered approximation of IBD's published methodology; the official formula and universe are proprietary. For official ratings, use [IBD MarketSmith](https://marketsmith.investors.com/).
 
-This tool is for **educational and research purposes**. It is not financial advice.
-
----
+This is a research and educational tool. It is not financial advice, and nothing it outputs is a recommendation to buy or sell any security.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

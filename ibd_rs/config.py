@@ -24,7 +24,7 @@ REFERENCE_TICKERS = ["SPY", "QQQ"]
 SCREENER_FILTERS = {"Market Cap.": "+Micro (over $50mln)"}
 EXCLUDED_INDUSTRIES = ["Exchange Traded Fund", "Shell Companies"]
 
-# Ticker universe caching and validation (see docs/plans/2026-07-11-neon-migration-and-reliability.md Slice 1)
+# Ticker universe caching and validation (see docs/wiki/Concepts.md "Universe validation")
 CACHE_DAYS = 7
 UNIVERSE_FLOOR = 3000  # absolute reject threshold; expected universe is ~4,600
 UNIVERSE_DROP_GUARD = 0.90  # reject if fetched < this fraction of the last-good count
