@@ -4,7 +4,7 @@ Uses the Neon Data API (PostgREST) to query pre-calculated RS ratings.
 Zero external dependencies -- uses only the Python standard library.
 
 Neon's Data API requires a bearer token on every request; there is no
-truly header-less anonymous path (see docs/DECISIONS.md, 2026-07-11). This
+truly header-less anonymous path (see docs/wiki/Architecture.md). This
 client fetches a short-lived anonymous token on first use, caches it in
 memory, and transparently refreshes it before it expires (tokens are valid
 for 1 hour).
