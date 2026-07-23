@@ -74,6 +74,24 @@ def _multiindex_close(tickers, dates, value=10.0):
     return pd.DataFrame(value, index=pd.to_datetime(dates), columns=columns)
 
 
+def test__stale_tickers_flags_ticker_missing_latest_session():
+    close_df = _dated_price_frame(
+        {
+            "FRESH": [10.0, 11.0],
+            "STALE": [20.0, np.nan],
+        },
+        ["2026-05-21", "2026-05-22"],
+    )
+
+    assert prices._stale_tickers(close_df) == {
+        "STALE": (
+            "stale: newest close 2026-05-21 "
+            "before latest session 2026-05-22"
+        )
+    }
+
+
+
 def test_download_batch_recovers_after_a_transient_failure(monkeypatch):
     calls = {"n": 0}
     ok_data = _multiindex_close(["A", "B"], ["2026-05-20", "2026-05-21"])
@@ -124,6 +142,67 @@ def test_download_update_stores_data_after_a_batch_level_retry(monkeypatch, conn
     assert _stored_tickers(conn) == ["A"]
 
 
+def test_download_update_always_writes_failed_tickers_empty_on_clean_run(
+    monkeypatch,
+):
+    _set_update_today(monkeypatch)
+    close_df = _dated_price_frame(
+        {"A": [10.0, 11.0], "B": [20.0, 21.0]},
+        ["2026-05-21", "2026-05-22"],
+    )
+    upserts = []
+    meta_writes = []
+    monkeypatch.setattr(prices, "_download_batch", lambda tickers, **kwargs: close_df)
+    monkeypatch.setattr(
+        prices.db,
+        "upsert_prices",
+        lambda passed_conn, records: upserts.append((passed_conn, records)),
+    )
+    monkeypatch.setattr(
+        prices.db,
+        "set_meta",
+        lambda passed_conn, key, value: meta_writes.append(
+            (passed_conn, key, value)
+        ),
+    )
+    conn = object()
+
+    failed = prices.download_update(["A", "B"], conn)
+
+    assert failed == {}
+    assert upserts and upserts[0][0] is conn
+    assert meta_writes == [
+        (conn, "failed_tickers", ""),
+        (conn, "last_update_date", "2026-05-22"),
+    ]
+
+
+def test_download_update_records_stale_ticker_in_failed_tickers(
+    monkeypatch, conn
+):
+    _set_update_today(monkeypatch)
+    close_df = _dated_price_frame(
+        {
+            "FRESH": [10.0, 11.0],
+            "STALE": [20.0, np.nan],
+        },
+        ["2026-05-21", "2026-05-22"],
+    )
+    monkeypatch.setattr(prices, "_download_batch", lambda tickers, **kwargs: close_df)
+
+    failed = prices.download_update(["FRESH", "STALE"], conn)
+
+    assert failed == {
+        "STALE": (
+            "stale: newest close 2026-05-21 "
+            "before latest session 2026-05-22"
+        )
+    }
+    assert db.get_meta(conn, "failed_tickers") == "STALE"
+    assert _stored_dates(conn, "STALE") == ["2026-05-21"]
+
+
+
 def test_download_initial_stores_all_tickers_when_all_returned(monkeypatch, conn):
     monkeypatch.setattr(
         prices,
@@ -132,11 +211,12 @@ def test_download_initial_stores_all_tickers_when_all_returned(monkeypatch, conn
             {"A": [10.0, 11.0], "B": [20.0, 21.0], "C": [30.0, 31.0]}
         ),
     )
+    db.set_meta(conn, "failed_tickers", "OLD_FAILURE")
 
     failed = prices.download_initial(["A", "B", "C"], conn)
 
     assert failed == {}
-    assert db.get_meta(conn, "failed_tickers") is None
+    assert db.get_meta(conn, "failed_tickers") == ""
     assert _stored_tickers(conn) == ["A", "B", "C"]
 
 

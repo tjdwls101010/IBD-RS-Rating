@@ -115,15 +115,9 @@ CREATE TABLE meta (
 
 **Why `date` is TEXT.** ISO-8601 strings sort lexicographically in the same order they sort chronologically, so range queries and `MAX(date)` work correctly without a date type, and the same SQL runs unmodified on SQLite and Postgres.
 
-**What a NULL means, per column:**
+**NULL semantics.** The single authoritative per-column definition is the “NULL semantics for `rs` data columns (authoritative)” block beside the schema in [`ibd_rs/db.py`](../../ibd_rs/db.py). It covers missing downloads, repair/manual clearing, retention pruning, insufficient history, coverage-gate failures, young tickers, and explicit clearing; keep consumers aligned to that block rather than duplicating the definition here.
 
-| Column | NULL means |
-|---|---|
-| `close` | No price for that ticker that day, or the row is past 13-month retention |
-| `rs_raw` | Insufficient history — the ticker was in warm-up |
-| `rs_rating` | Either `rs_raw` is null, or the date's coverage fell below the universe threshold |
-
-That last case is important: `rs_raw IS NOT NULL AND rs_rating IS NULL` is exactly the signature of a date that was computed but judged untrustworthy. It is how a low-coverage day is recorded without publishing bad ratings, and how the self-healing recompute later finds days worth re-rating.
+One important consequence of the canonical `rs_rating` rule is that `rs_raw IS NOT NULL AND rs_rating IS NULL` is exactly the signature of a date that was computed but judged untrustworthy. It is how a low-coverage day is recorded without publishing bad ratings, and how the self-healing recompute later finds days worth re-rating.
 
 **`meta`** is a key-value store for pipeline state: `ticker_list` (the cached universe as a comma-joined string), `ticker_list_date`, `last_rs_date`, `last_update_date`, `last_successful_fetch`, `failed_tickers`.
 

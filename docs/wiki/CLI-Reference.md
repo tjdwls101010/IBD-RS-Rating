@@ -86,7 +86,7 @@ It then prints `status` output automatically.
 
 This is stricter than `update`, which degrades to cached data and continues. `init` has no fallback worth having — a database built on 55 tickers would be fully populated with meaningless ratings, which is far harder to notice than a failed command.
 
-**Safe to re-run.** All writes are upserts, so a failed run can be restarted. It will re-download everything, though — if prices are already loaded and only ratings are wrong, use [`recalc`](#recalc).
+**Safe to re-run.** All writes are upserts, so a failed run can be restarted. It will re-download everything, though — if prices are already loaded and only ratings are wrong, use [`recalc --from <date> --to <date>`](#recalc).
 
 **Exit codes:** `0` success · `1` untrusted universe
 
@@ -146,23 +146,27 @@ A failed run has still written whatever data it obtained — the failure means "
 
 ## `recalc`
 
-Recompute every rating from prices already stored. Downloads nothing.
+Recompute ratings from prices already stored. Downloads nothing. Two modes:
+
+**Rating-only backfill (safe, recommended):**
 
 ```bash
-python -m ibd_rs recalc
+python -m ibd_rs recalc --from 2026-06-30 --to 2026-07-17
 ```
 
-Equivalent to `init`'s step 4 with `recalc_all=True`, over the full date range.
+Re-ranks the **stored** `rs_raw` for the date range under the current gate and writes **only** `rs_rating` — `rs_raw` and `close` are never touched. This is the safe way to restore or fix ratings, including on the retention-pruned production database.
 
-Reach for it when:
+**Full recompute (guarded):**
 
-- You changed `RS_WEIGHTS`, `RS_UNIVERSE_THRESHOLD`, or the computation itself
-- Historical ratings are suspect and you want them rebuilt from known-good prices
-- You backfilled prices and need the affected dates re-rated
+```bash
+python -m ibd_rs recalc --force-full
+```
 
-It rewrites the full history, so ratings that were previously withheld may now appear (and vice versa) if coverage or thresholds changed. Prices are untouched — this is the safe way to fix ratings without re-downloading anything.
+Clears and recomputes `rs_raw` + `rs_rating` across the full loaded window — for formula or weight changes. It is **refused unless the loaded price window has full lookback** for the oldest stored rating: on a 13-month-pruned database it would clear ~1 year of ratings it cannot recompute, so the guard aborts. Use the rating-only backfill instead, or run against a full-history copy.
 
-**Exit codes:** `0` always (barring an unhandled error)
+Running `recalc` with no flag errors out and points you at the two modes.
+
+**Exit codes:** `0` success · `1` no mode selected / refused full recompute / no RS cursor
 
 ---
 
@@ -301,7 +305,7 @@ python -m ibd_rs update || notify "RS pipeline failed"
 **After changing the RS formula**
 
 ```bash
-python -m ibd_rs recalc
+python -m ibd_rs recalc --force-full
 python -m ibd_rs status
 ```
 

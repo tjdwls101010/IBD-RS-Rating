@@ -215,17 +215,25 @@ GROUP BY date ORDER BY date DESC;
 | Both 0 | RS computation didn't run, or prices are missing |
 | Both high | Ratings exist; the problem is in your query |
 
-For the first case, fix the price gap and the [recompute window](Concepts.md#self-healing-recompute-window) re-rates it within 15 trading days. Beyond that window, `recalc` rebuilds everything.
+For the first case, fix the price gap and the [recompute window](Concepts.md#self-healing-recompute-window) re-rates it within 15 trading days. Beyond that window, `recalc --from <date> --to <date>` re-ranks the stored ratings for that range (a full `recalc --force-full` is refused on the retention-pruned database, which would drop history it cannot recompute).
 
 ### Ratings look wrong after a config change
 
-Changing `RS_WEIGHTS` or `RS_UNIVERSE_THRESHOLD` doesn't retroactively update stored data — old ratings keep their old meaning, so the history becomes internally inconsistent.
+Changing `RS_WEIGHTS` (the raw-score formula) or `RS_UNIVERSE_THRESHOLD` (the rating gate) doesn't retroactively update stored data — old ratings keep their old meaning, so the history becomes internally inconsistent. The fix differs by which you changed:
+
+- **`RS_UNIVERSE_THRESHOLD`, or any gate/universe change:** only the *rating* depends on it, not `rs_raw`. Re-rank the stored `rs_raw` without recomputing it:
 
 ```bash
-python -m ibd_rs recalc
+python -m ibd_rs recalc --from <date> --to <date>
 ```
 
-This rebuilds every rating from stored prices without downloading. Back up first.
+- **`RS_WEIGHTS`, or any raw-formula change:** the `rs_raw` values themselves change, so they must be recomputed from prices — a re-rank is not enough:
+
+```bash
+python -m ibd_rs recalc --force-full
+```
+
+This needs full price history and is refused on the retention-pruned database, so recompute on a full-history copy. Back up first.
 
 ### A ticker's prices look wrong after a split
 
@@ -239,7 +247,7 @@ conn = db.get_connection()
 splits.verify_and_repair(conn, ["XYZ"])
 ```
 
-Then `recalc`, since the bad prices already fed into ratings.
+Then re-rate the affected dates — within the recompute window the next `update` re-rates them automatically; otherwise `recalc --force-full` (needs full price history).
 
 If the split is older than the lookback window, force a full re-download of that ticker by clearing its prices (`db.delete_ticker_prices`) and running `init`.
 

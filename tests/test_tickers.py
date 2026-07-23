@@ -1,23 +1,50 @@
-"""Tests for ticker universe fetch hardening (docs/plans/2026-07-11-...-reliability.md Slice 1)."""
+"""Tests for ticker universe fetching, validation, and cache isolation."""
 
-import pandas as pd
+from datetime import date
+
 import pytest
 
 from ibd_rs import db
 from ibd_rs import tickers
-from ibd_rs.config import UNIVERSE_FLOOR
+from ibd_rs.config import ANCHOR_TICKERS, SCREENER_FILTERS, UNIVERSE_FLOOR
 
 
 @pytest.fixture
 def conn():
-    c = db.get_connection(":memory:")
-    db.init_db(c)
-    yield c
-    c.close()
+    connection = db.get_connection(":memory:")
+    db.init_db(connection)
+    yield connection
+    connection.close()
 
 
-def _records(n, prefix="T"):
-    return [{"ticker": f"{prefix}{i}", "sector": "Tech", "industry": "Software"} for i in range(n)]
+def _generated_symbols(n, prefix="Z"):
+    symbols = []
+    for value in range(n):
+        chars = []
+        current = value
+        for _ in range(4):
+            chars.append(chr(ord("A") + current % 26))
+            current //= 26
+        symbols.append(prefix + "".join(reversed(chars)))
+    return symbols
+
+
+def _clean_tickers(n, prefix="Z"):
+    assert n >= len(ANCHOR_TICKERS)
+    tickers_out = list(ANCHOR_TICKERS)
+    for symbol in _generated_symbols(n, prefix):
+        if symbol not in tickers_out:
+            tickers_out.append(symbol)
+        if len(tickers_out) == n:
+            break
+    return tickers_out
+
+
+def _records(n, prefix="Z"):
+    return [
+        {"ticker": ticker, "sector": "Technology", "industry": "Software"}
+        for ticker in _clean_tickers(n, prefix)
+    ]
 
 
 def _no_sleep(monkeypatch):
@@ -26,63 +53,151 @@ def _no_sleep(monkeypatch):
 
 # --- _validate_universe_size: pure logic, no mocking needed ---
 
+
 def test_validate_rejects_below_absolute_floor():
-    ok, reason = tickers._validate_universe_size(UNIVERSE_FLOOR - 1, None, None, None)
+    ok, reason = tickers._validate_universe_size(
+        UNIVERSE_FLOOR - 1, None, None, None,
+    )
     assert ok is False
     assert "floor" in reason
 
 
 def test_validate_accepts_at_or_above_floor_with_no_baseline():
-    ok, reason = tickers._validate_universe_size(UNIVERSE_FLOOR, None, None, None)
+    ok, reason = tickers._validate_universe_size(
+        UNIVERSE_FLOOR, None, None, None,
+    )
     assert ok is True
 
 
 def test_validate_rejects_drop_below_90pct_of_last_good():
-    ok, reason = tickers._validate_universe_size(4000, last_good_count=4600, raw_count=None, reported_total=None)
+    ok, reason = tickers._validate_universe_size(
+        4000, last_good_count=4600, raw_count=None, reported_total=None,
+    )
     assert ok is False
     assert "last-good" in reason
 
 
 def test_validate_accepts_small_drop_within_90pct_of_last_good():
-    ok, reason = tickers._validate_universe_size(4200, last_good_count=4600, raw_count=None, reported_total=None)
+    ok, reason = tickers._validate_universe_size(
+        4200, last_good_count=4600, raw_count=None, reported_total=None,
+    )
     assert ok is True
 
 
 def test_validate_rejects_below_98pct_of_reported_total():
-    # raw_count (pre-filter) is what's compared against reported_total, not
-    # the final filtered count -- see test_fetch_universe_attempt_* below for
-    # why comparing the filtered count would be a false-positive-truncation bug.
-    ok, reason = tickers._validate_universe_size(4000, last_good_count=None, raw_count=4000, reported_total=4600)
+    ok, reason = tickers._validate_universe_size(
+        4000, last_good_count=None, raw_count=4000, reported_total=4600,
+    )
     assert ok is False
     assert "reported total" in reason
 
 
 def test_validate_accepts_within_98pct_of_reported_total():
-    ok, reason = tickers._validate_universe_size(4550, last_good_count=None, raw_count=4550, reported_total=4600)
+    ok, reason = tickers._validate_universe_size(
+        4550, last_good_count=None, raw_count=4550, reported_total=4600,
+    )
     assert ok is True
 
 
 def test_validate_uses_raw_count_not_filtered_count_for_completeness_check():
-    """Reproduces a real production false-positive: Finviz fully returned all
-    matching rows (raw_count 4955 of a reported 4960 = 99.9% complete), but
-    after our own EXCLUDED_INDUSTRIES filtering the final count (4658) alone
-    would look like only 93.9% -- comparing the final count against
-    reported_total would wrongly reject a complete fetch as truncated."""
     ok, reason = tickers._validate_universe_size(
         4658, last_good_count=None, raw_count=4955, reported_total=4960,
     )
     assert ok is True
 
 
-# --- fetch_ticker_list orchestration: mock at the _fetch_with_retries seam ---
+# --- Semantic universe validation ---
 
-def test_good_fetch_is_cached_and_advances_timestamp(monkeypatch, conn):
+
+def test_validate_universe_rejects_missing_anchors():
+    mangled_anchors = [ticker[0] + ticker for ticker in ANCHOR_TICKERS]
+    other_count = UNIVERSE_FLOOR - len(mangled_anchors)
+    records = [
+        {"ticker": ticker, "sector": None, "industry": None}
+        for ticker in mangled_anchors + _generated_symbols(other_count, "Q")
+    ]
+
+    size_ok, _ = tickers._validate_universe_size(
+        len(records), None, len(records), len(records),
+    )
+    ok, reason = tickers._validate_universe(records, None)
+
+    assert size_ok is True
+    assert ok is False
+    assert "missing anchor" in reason
+    assert "AAPL" in reason
+
+
+def test_validate_universe_rejects_mass_malformed_shapes():
+    records = _records(100)
+    records.extend(
+        {"ticker": f"BAD{i}", "sector": None, "industry": None}
+        for i in range(10)
+    )
+
+    ok, reason = tickers._validate_universe(records, None)
+
+    assert ok is False
+    assert "malformed symbol fraction" in reason
+
+
+def test_validate_universe_rejects_low_jaccard_vs_last_good():
+    records = _records(200, prefix="Z")
+    last_good = _clean_tickers(200, prefix="Y")
+
+    ok, reason = tickers._validate_universe(records, last_good)
+
+    assert ok is False
+    assert "Jaccard" in reason
+
+
+def test_validate_universe_accepts_a_clean_fetch():
+    records = _records(200)
+    last_good = [record["ticker"] for record in records]
+
+    ok, reason = tickers._validate_universe(records, last_good)
+
+    assert ok is True
+    assert reason == "ok"
+
+
+def test_fetch_and_validate_calls_both_guards_when_size_fails(monkeypatch):
+    calls = []
     monkeypatch.setattr(
-        tickers, "_fetch_with_retries",
+        tickers,
+        "_fetch_with_retries",
+        lambda: (_records(20), 20, 20),
+    )
+    monkeypatch.setattr(
+        tickers,
+        "_validate_universe_size",
+        lambda *_args: calls.append("size") or (False, "bad size"),
+    )
+    monkeypatch.setattr(
+        tickers,
+        "_validate_universe",
+        lambda *_args: calls.append("semantic") or (True, "ok"),
+    )
+
+    records, trusted, reason = tickers._fetch_and_validate(None)
+
+    assert calls == ["size", "semantic"]
+    assert records is None
+    assert trusted is False
+    assert reason == "bad size"
+
+
+# --- Weekly refresh orchestration ---
+
+
+def test_good_refresh_is_cached_and_advances_timestamp(monkeypatch, conn):
+    monkeypatch.setattr(
+        tickers,
+        "_fetch_with_retries",
         lambda: (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR),
     )
 
-    result, conn = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.refresh_universe(conn)
 
     assert result.trusted is True
     assert len(result.tickers) == UNIVERSE_FLOOR
@@ -91,28 +206,56 @@ def test_good_fetch_is_cached_and_advances_timestamp(monkeypatch, conn):
     assert len(db.get_meta(conn, "ticker_list").split(",")) == UNIVERSE_FLOOR
 
 
-def test_truncated_fetch_is_rejected_and_serves_last_good(monkeypatch, conn):
-    # Seed a last-good cache (simulating a prior healthy fetch), far enough in the
-    # past that it would normally be stale, so the code path exercises a fresh attempt.
-    good = _records(4600, prefix="G")
-    db.set_meta(conn, "ticker_list", ",".join(r["ticker"] for r in good))
+def test_full_count_anchor_corruption_is_rejected_and_serves_last_good(
+    monkeypatch, conn,
+):
+    good = _clean_tickers(UNIVERSE_FLOOR, prefix="G")
+    db.set_meta(conn, "ticker_list", ",".join(good))
     db.set_meta(conn, "ticker_list_date", "2000-01-01")
 
-    # Reproduces the 2026-07-08 incident: Finviz returns 55 tickers.
-    monkeypatch.setattr(tickers, "_fetch_with_retries", lambda: (_records(55), 55, 4600))
+    mangled = [ticker[0] + ticker for ticker in ANCHOR_TICKERS]
+    mangled.extend(
+        _generated_symbols(UNIVERSE_FLOOR - len(mangled), prefix="Q")
+    )
+    records = [
+        {"ticker": ticker, "sector": None, "industry": None}
+        for ticker in mangled
+    ]
+    monkeypatch.setattr(
+        tickers,
+        "_fetch_with_retries",
+        lambda: (records, len(records), len(records)),
+    )
 
-    result, conn = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.refresh_universe(conn)
+
+    assert result.trusted is False
+    assert "missing anchor" in result.reason
+    assert result.tickers == good
+    assert db.get_meta(conn, "ticker_list_date") == "2000-01-01"
+
+
+def test_truncated_refresh_is_rejected_and_serves_last_good(monkeypatch, conn):
+    good = _clean_tickers(4600, prefix="G")
+    db.set_meta(conn, "ticker_list", ",".join(good))
+    db.set_meta(conn, "ticker_list_date", "2000-01-01")
+    monkeypatch.setattr(
+        tickers,
+        "_fetch_with_retries",
+        lambda: (_records(55), 55, 4600),
+    )
+
+    result, conn = tickers.refresh_universe(conn)
 
     assert result.trusted is False
     assert "floor" in result.reason
-    assert len(result.tickers) == 4600  # served last-good, not the truncated 55
-    # The bad fetch must NOT have overwritten the cache.
+    assert result.tickers == good
     assert db.get_meta(conn, "ticker_list_date") == "2000-01-01"
 
 
 def test_fetch_failure_after_retries_serves_last_good(monkeypatch, conn):
-    good = _records(4600, prefix="G")
-    db.set_meta(conn, "ticker_list", ",".join(r["ticker"] for r in good))
+    good = _clean_tickers(4600, prefix="G")
+    db.set_meta(conn, "ticker_list", ",".join(good))
     db.set_meta(conn, "ticker_list_date", "2000-01-01")
 
     def always_fail():
@@ -120,170 +263,265 @@ def test_fetch_failure_after_retries_serves_last_good(monkeypatch, conn):
 
     monkeypatch.setattr(tickers, "_fetch_with_retries", always_fail)
 
-    result, conn = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.refresh_universe(conn)
 
     assert result.trusted is False
     assert "blocked" in result.reason
-    assert len(result.tickers) == 4600
+    assert result.tickers == good
     assert db.get_meta(conn, "ticker_list_date") == "2000-01-01"
 
 
-def test_fetch_failure_with_no_cache_falls_back_to_nasdaq_trader(monkeypatch, conn):
+def test_fetch_failure_with_no_cache_falls_back_to_nasdaq_trader(
+    monkeypatch, conn,
+):
     def always_fail():
         raise RuntimeError("blocked")
 
     monkeypatch.setattr(tickers, "_fetch_with_retries", always_fail)
     monkeypatch.setattr(
-        tickers.nasdaq_trader, "fetch_common_stock_tickers",
+        tickers.nasdaq_trader,
+        "fetch_common_stock_tickers",
         lambda: [{"ticker": "AAPL", "sector": None, "industry": None}],
     )
 
-    result, conn = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.refresh_universe(conn)
 
     assert result.trusted is False
     assert "Nasdaq Trader fallback" in result.reason
     assert result.tickers == ["AAPL"]
-    assert db.get_meta(conn, "ticker_list") is None  # fallback is never cached as the new baseline
+    assert db.get_meta(conn, "ticker_list") is None
 
 
-def test_partial_fetch_below_completeness_ratio_is_rejected_as_truncated(monkeypatch, conn):
-    # A modest last-good baseline means the 90% drop-guard alone would pass
-    # a 4000-ticker fetch, but Finviz itself reports 4600 are available --
-    # a plausible-looking but truncated fetch that only the completeness
-    # cross-check against Finviz's own total catches. raw_count == the final
-    # count here since no exclusions are simulated at this orchestration level.
-    good = _records(3000, prefix="G")
-    db.set_meta(conn, "ticker_list", ",".join(r["ticker"] for r in good))
-    db.set_meta(conn, "ticker_list_date", "2000-01-01")
+def test_partial_refresh_below_reported_total_is_rejected(monkeypatch, conn):
+    monkeypatch.setattr(
+        tickers,
+        "_fetch_with_retries",
+        lambda: (_records(4000), 4000, 4600),
+    )
+    monkeypatch.setattr(
+        tickers.nasdaq_trader,
+        "fetch_common_stock_tickers",
+        lambda: [{"ticker": "AAPL", "sector": None, "industry": None}],
+    )
 
-    monkeypatch.setattr(tickers, "_fetch_with_retries", lambda: (_records(4000), 4000, 4600))
-
-    result, conn = tickers.fetch_ticker_list(conn)
+    result, conn = tickers.refresh_universe(conn)
 
     assert result.trusted is False
     assert "reported total" in result.reason
 
 
-def test_trusted_fetch_uses_reconnected_connection_for_post_fetch_writes(monkeypatch, conn):
-    """db.reconnect's own dead/alive detection is unit-tested in test_db.py;
-    this verifies fetch_ticker_list calls it after the slow Finviz fetch and
-    writes results through whatever connection it returns -- guarding
-    against Neon's serverless auto-suspend killing the session during the
-    multi-minute screener scrape (observed: "SSL connection has been closed
-    unexpectedly" right as results were about to be cached)."""
+def test_trusted_refresh_uses_reconnected_connection_for_writes(
+    monkeypatch, conn,
+):
     fresh_conn = db.get_connection(":memory:")
     db.init_db(fresh_conn)
-    monkeypatch.setattr(db, "reconnect", lambda c: fresh_conn)
+    monkeypatch.setattr(db, "reconnect", lambda connection: fresh_conn)
     monkeypatch.setattr(
-        tickers, "_fetch_with_retries",
+        tickers,
+        "_fetch_with_retries",
         lambda: (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR),
     )
 
-    result, returned_conn = tickers.fetch_ticker_list(conn)
+    result, returned_conn = tickers.refresh_universe(conn)
 
     assert result.trusted is True
-    assert len(result.tickers) == UNIVERSE_FLOOR
     assert returned_conn is fresh_conn
-    # writes landed on the reconnected connection...
     assert len(db.get_meta(fresh_conn, "ticker_list").split(",")) == UNIVERSE_FLOOR
-    # ...not on the original (possibly-dead) one
     assert db.get_meta(conn, "ticker_list") is None
+    fresh_conn.close()
 
 
-def test_fresh_cache_is_reused_without_a_new_fetch(monkeypatch, conn):
-    db.set_meta(conn, "ticker_list", "AAPL,MSFT")
-    from datetime import date
+def test_refresh_universe_always_fetches_even_with_current_cache(monkeypatch, conn):
+    good = _clean_tickers(UNIVERSE_FLOOR)
+    db.set_meta(conn, "ticker_list", ",".join(good))
     db.set_meta(conn, "ticker_list_date", date.today().isoformat())
-
-    def fail_if_called():
-        raise AssertionError("should not fetch when cache is fresh")
-
-    monkeypatch.setattr(tickers, "_fetch_with_retries", fail_if_called)
-
-    result, conn = tickers.fetch_ticker_list(conn)
-
-    assert result.trusted is True
-    assert result.tickers == ["AAPL", "MSFT"]
-
-
-def test_force_refresh_bypasses_a_fresh_cache(monkeypatch, conn):
-    db.set_meta(conn, "ticker_list", "AAPL,MSFT")
-    from datetime import date
-    db.set_meta(conn, "ticker_list_date", date.today().isoformat())
-
+    calls = []
     monkeypatch.setattr(
-        tickers, "_fetch_with_retries",
-        lambda: (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR),
+        tickers,
+        "_fetch_with_retries",
+        lambda: calls.append("fetch")
+        or (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR),
     )
 
-    result, conn = tickers.fetch_ticker_list(conn, force_refresh=True)
+    result, conn = tickers.refresh_universe(conn)
 
+    assert calls == ["fetch"]
     assert result.trusted is True
-    assert len(result.tickers) == UNIVERSE_FLOOR
 
 
-# --- _fetch_universe_attempt: the finvizfinance integration boundary ---
-
-class _FakeOverview:
-    url = "https://finviz.com/screener.ashx"
-    size = 20
-    request_params = {}
-
-    def __init__(self, df):
-        self._df = df
-
-    def set_filter(self, filters_dict):
-        self.filters_dict = filters_dict
-
-    def screener_view(self, verbose=0):
-        return self._df
+# --- Daily cache-only path ---
 
 
-def test_fetch_universe_attempt_excludes_etfs_and_adds_reference_tickers(monkeypatch):
-    df = pd.DataFrame([
-        {"Ticker": "AAPL", "Sector": "Technology", "Industry": "Consumer Electronics"},
-        {"Ticker": "FAKE", "Sector": "", "Industry": "Exchange Traded Fund"},
-        {"Ticker": "MSFT", "Sector": "Technology", "Industry": "Software"},
-    ])
-    monkeypatch.setattr(tickers, "Overview", lambda: _FakeOverview(df))
-    monkeypatch.setattr(tickers, "_reported_total", lambda foverview: 3)
+def test_get_cached_universe_serves_valid_cache(monkeypatch, conn):
+    cached = _clean_tickers(UNIVERSE_FLOOR)
+    db.set_meta(conn, "ticker_list", ",".join(cached))
+
+    monkeypatch.setattr(
+        tickers.finviz,
+        "fetch_screener_records",
+        lambda *_args, **_kwargs: pytest.fail("daily cache read must not call Finviz"),
+    )
+    monkeypatch.setattr(
+        tickers.nasdaq_trader,
+        "fetch_common_stock_tickers",
+        lambda: pytest.fail("valid cache must not use fallback"),
+    )
+
+    result, returned_conn = tickers.get_cached_universe(conn)
+
+    assert returned_conn is conn
+    assert result.trusted is True
+    assert result.tickers == cached
+    assert result.reason == "cache-valid"
+
+
+def test_get_cached_universe_rejects_poisoned_cache(monkeypatch, conn):
+    poisoned = [ticker[0] + ticker for ticker in ANCHOR_TICKERS] + _generated_symbols(UNIVERSE_FLOOR)
+    db.set_meta(conn, "ticker_list", ",".join(poisoned))
+    monkeypatch.setattr(
+        tickers.nasdaq_trader,
+        "fetch_common_stock_tickers",
+        lambda: [{"ticker": "AAPL", "sector": None, "industry": None}],
+    )
+
+    result, conn = tickers.get_cached_universe(conn)
+
+    assert result.trusted is False
+    assert "cached universe invalid" in result.reason
+    assert "missing anchor" in result.reason
+    assert result.tickers == ["AAPL"]
+    assert db.get_meta(conn, "ticker_list") == ",".join(poisoned)
+
+
+def test_get_cached_universe_rejects_undersized_cache(monkeypatch, conn):
+    """A cache containing the anchors but below UNIVERSE_FLOOR must NOT be
+    trusted on the daily path (it would also poison the refresh Jaccard
+    baseline). It routes to the untrusted Nasdaq fallback, cache untouched."""
+    undersized = _clean_tickers(len(ANCHOR_TICKERS) + 20)  # anchors present, << floor
+    db.set_meta(conn, "ticker_list", ",".join(undersized))
+    monkeypatch.setattr(
+        tickers.nasdaq_trader,
+        "fetch_common_stock_tickers",
+        lambda: [{"ticker": "AAPL", "sector": None, "industry": None}],
+    )
+
+    result, conn = tickers.get_cached_universe(conn)
+
+    assert result.trusted is False
+    assert "below floor" in result.reason
+    assert db.get_meta(conn, "ticker_list") == ",".join(undersized)
+
+
+def test_refresh_universe_ignores_undersized_cache_as_baseline(monkeypatch, conn):
+    """A clean full refresh must HEAL an undersized/poisoned cache rather than
+    being Jaccard-rejected against it: the invalid cache is not used as the
+    day-over-day baseline."""
+    undersized = _clean_tickers(len(ANCHOR_TICKERS) + 5)
+    db.set_meta(conn, "ticker_list", ",".join(undersized))
+    clean = _records(UNIVERSE_FLOOR)
+    monkeypatch.setattr(
+        tickers,
+        "_fetch_with_retries",
+        lambda: (clean, UNIVERSE_FLOOR, UNIVERSE_FLOOR),
+    )
+
+    result, conn = tickers.refresh_universe(conn)
+
+    assert result.trusted is True  # not Jaccard-deadlocked against the tiny cache
+    healed = db.get_meta(conn, "ticker_list").split(",")
+    assert len(healed) == UNIVERSE_FLOOR
+    assert set(ANCHOR_TICKERS).issubset(healed)
+
+
+def test_get_cached_universe_with_no_cache_uses_untrusted_fallback(
+    monkeypatch, conn,
+):
+    monkeypatch.setattr(
+        tickers.nasdaq_trader,
+        "fetch_common_stock_tickers",
+        lambda: [{"ticker": "MSFT", "sector": None, "industry": None}],
+    )
+
+    result, conn = tickers.get_cached_universe(conn)
+
+    assert result.trusted is False
+    assert "no cached universe" in result.reason
+    assert result.tickers == ["MSFT"]
+
+
+# --- Owned Finviz integration boundary ---
+
+
+def test_fetch_universe_attempt_excludes_etfs_and_adds_reference_tickers(
+    monkeypatch,
+):
+    seen_filters = []
+    fetched = [
+        {
+            "ticker": "AAPL",
+            "sector": "Technology",
+            "industry": "Consumer Electronics",
+        },
+        {
+            "ticker": "FAKE",
+            "sector": None,
+            "industry": "Exchange Traded Fund",
+        },
+        {"ticker": "MSFT", "sector": "Technology", "industry": "Software"},
+    ]
+    monkeypatch.setattr(
+        tickers.finviz,
+        "fetch_screener_records",
+        lambda filters: seen_filters.append(filters) or (fetched, 3, 3),
+    )
 
     records, raw_count, reported_total = tickers._fetch_universe_attempt()
 
-    tickers_out = {r["ticker"] for r in records}
-    assert tickers_out == {"AAPL", "MSFT", "SPY", "QQQ"}  # FAKE excluded; reference tickers added
-    assert raw_count == 3  # the raw Finviz row count, before exclusion/reference-addition
+    assert seen_filters == [SCREENER_FILTERS]
+    assert {record["ticker"] for record in records} == {
+        "AAPL", "MSFT", "SPY", "QQQ",
+    }
+    assert raw_count == 3
     assert reported_total == 3
-    assert records == sorted(records, key=lambda r: r["ticker"])
+    assert records == sorted(records, key=lambda record: record["ticker"])
 
 
-def test_fetch_universe_attempt_raw_count_is_unaffected_by_exclusions(monkeypatch):
-    """raw_count must reflect what Finviz returned, not our post-filter
-    count -- this is the exact distinction that fixes the false-positive
-    truncation bug (see test_validate_uses_raw_count_not_filtered_count)."""
-    df = pd.DataFrame([
-        {"Ticker": "AAPL", "Sector": "Technology", "Industry": "Consumer Electronics"},
-        {"Ticker": "ETF1", "Sector": "", "Industry": "Exchange Traded Fund"},
-        {"Ticker": "ETF2", "Sector": "", "Industry": "Exchange Traded Fund"},
-    ])
-    monkeypatch.setattr(tickers, "Overview", lambda: _FakeOverview(df))
-    monkeypatch.setattr(tickers, "_reported_total", lambda foverview: 3)
+def test_fetch_universe_attempt_raw_count_is_unaffected_by_exclusions(
+    monkeypatch,
+):
+    fetched = [
+        {
+            "ticker": "AAPL",
+            "sector": "Technology",
+            "industry": "Consumer Electronics",
+        },
+        {"ticker": "ETF1", "sector": None, "industry": "Exchange Traded Fund"},
+        {"ticker": "ETF2", "sector": None, "industry": "Exchange Traded Fund"},
+    ]
+    monkeypatch.setattr(
+        tickers.finviz,
+        "fetch_screener_records",
+        lambda _filters: (fetched, 3, 3),
+    )
 
     records, raw_count, reported_total = tickers._fetch_universe_attempt()
 
-    assert raw_count == 3  # all 3 raw rows, including the 2 excluded ETFs
-    assert {r["ticker"] for r in records} == {"AAPL", "SPY", "QQQ"}  # only 1 + 2 references
+    assert raw_count == 3
+    assert {record["ticker"] for record in records} == {"AAPL", "SPY", "QQQ"}
 
 
-def test_fetch_universe_attempt_raises_when_screener_returns_none(monkeypatch):
-    monkeypatch.setattr(tickers, "Overview", lambda: _FakeOverview(None))
-    monkeypatch.setattr(tickers, "_reported_total", lambda foverview: None)
+def test_fetch_universe_attempt_propagates_parser_failure(monkeypatch):
+    def fail(_filters):
+        raise RuntimeError("no results")
 
-    with pytest.raises(RuntimeError):
+    monkeypatch.setattr(tickers.finviz, "fetch_screener_records", fail)
+
+    with pytest.raises(RuntimeError, match="no results"):
         tickers._fetch_universe_attempt()
 
 
-# --- retry/backoff behavior ---
+# --- Retry/backoff behavior ---
+
 
 def test_fetch_with_retries_recovers_after_transient_failures(monkeypatch):
     _no_sleep(monkeypatch)
@@ -293,7 +531,7 @@ def test_fetch_with_retries_recovers_after_transient_failures(monkeypatch):
         calls["n"] += 1
         if calls["n"] < 3:
             raise RuntimeError("rate limited")
-        return (_records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR)
+        return _records(UNIVERSE_FLOOR), UNIVERSE_FLOOR, UNIVERSE_FLOOR
 
     monkeypatch.setattr(tickers, "_fetch_universe_attempt", flaky)
 
@@ -313,3 +551,34 @@ def test_fetch_with_retries_raises_after_exhausting_all_attempts(monkeypatch):
 
     with pytest.raises(RuntimeError, match="blocked"):
         tickers._fetch_with_retries()
+
+
+# --- Weekly enrichment corruption-resistance (D12) ---
+
+
+def test_refresh_universe_does_not_upsert_sector_on_untrusted_fetch(monkeypatch, conn):
+    """Corruption-resistant enrichment: a validity-failing fetch (e.g. the logo
+    corruption where the anchors are mangled) must NOT write sector/industry
+    rows, so the weekly job can never poison the tickers table (D12)."""
+    db.set_meta(conn, "ticker_list", ",".join(_clean_tickers(UNIVERSE_FLOOR)))
+    corrupt = [
+        {"ticker": ticker[0] + ticker, "sector": "Junk", "industry": "Junk"}
+        for ticker in ANCHOR_TICKERS
+    ] + [
+        {"ticker": symbol, "sector": "Junk", "industry": "Junk"}
+        for symbol in _generated_symbols(UNIVERSE_FLOOR)
+    ]
+    monkeypatch.setattr(
+        tickers,
+        "_fetch_with_retries",
+        lambda: (corrupt, len(corrupt), len(corrupt)),
+    )
+    upserts = []
+    monkeypatch.setattr(
+        tickers.db, "upsert_tickers", lambda c, records: upserts.append(records)
+    )
+
+    result, conn = tickers.refresh_universe(conn)
+
+    assert result.trusted is False
+    assert upserts == []  # a corrupt fetch never writes sector/industry rows

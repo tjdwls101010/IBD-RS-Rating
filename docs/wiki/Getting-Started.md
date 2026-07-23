@@ -13,10 +13,10 @@ Most people want the first.
 
 ### Prerequisites
 
-Python 3.10 or newer, and an internet connection. That's the whole list — the client has no dependencies and needs no account, API key, or configuration.
+Python 3.11 or newer, and an internet connection. That's the whole list — the client has no dependencies and needs no account, API key, or configuration.
 
 ```bash
-python --version    # must be 3.10+
+python --version    # must be 3.11+
 ```
 
 ### Install
@@ -133,7 +133,7 @@ Build your own rating database instead of reading the hosted one. Worth doing if
 
 ### Prerequisites
 
-- Python 3.10+ (CI runs 3.12)
+- Python 3.11+ (CI runs 3.11 and 3.12)
 - ~30 minutes for the initial load, most of it waiting on downloads
 - A stable connection — the initial load makes several thousand requests
 - Optionally, a Postgres database. Without one, everything runs on local SQLite.

@@ -179,28 +179,30 @@ Change with care:
 
 | Constant | Why |
 |---|---|
-| `RS_WEIGHTS` | Redefines what every rating means; new values aren't comparable to stored history. Run `recalc` after. |
+| `RS_WEIGHTS` | Redefines what every rating means; new values aren't comparable to stored history. Recompute with `recalc --force-full` after (needs full price history; refused on the retention-pruned DB). |
 | `RS_UNIVERSE_THRESHOLD` | Lowering it publishes ratings computed against thinner populations — exactly the failure the threshold exists to prevent |
 | `RS_RECOMPUTE_WINDOW_DAYS` | Bounded on both sides; above ~21 trading days, recomputed dates need lookback prices retention has deleted. A test enforces this. |
 | `UNIVERSE_FLOOR` and the two ratios | These are the truncation defences |
 
 ## Backup and recovery
 
-**Back up before any bulk operation** — a `recalc`, a retention change, a formula change:
+**Back up before any bulk operation** — a `recalc --force-full`, a retention change, a formula change:
 
 ```bash
 pg_dump "$DATABASE_URL" -t rs -t tickers -t meta | gzip > rs_backup_$(date +%F).sql.gz
 ```
 
+**Freeze the daily cron first.** Before any backfill or recompute, disable the *Daily RS Update* workflow (comment out its `schedule:` trigger, or disable the workflow) so a scheduled run's `prune_old_close` cannot DELETE the NULL-rated rows you are repairing mid-recovery. Re-enable it only after verifying the result.
+
 Recovery paths, cheapest first:
 
 | Damage | Fix |
 |---|---|
-| Ratings wrong, prices good | `python -m ibd_rs recalc` — no downloads |
+| Ratings wrong, prices good | `python -m ibd_rs recalc --from <date> --to <date>` — re-ranks stored `rs_raw`, writes only `rs_rating`, no downloads |
 | Recent prices missing | `python -m ibd_rs update` — the trailing window backfills up to 10 days |
 | Older prices missing | Restore from backup, or `init` to rebuild |
 | Universe cache poisoned | `DELETE FROM meta WHERE key IN ('ticker_list','ticker_list_date')`, then `update` |
-| Total loss | `python -m ibd_rs init` — 30 minutes, but history beyond 2 years is gone |
+| Total loss | `python -m ibd_rs init --force-full` — 30 minutes, but history beyond 2 years is gone |
 
 Note the asymmetry: prices are re-downloadable, ratings are re-computable, but **history older than the 2-year download window is not recoverable** once lost. If long history matters to you, back it up.
 

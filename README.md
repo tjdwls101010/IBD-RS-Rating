@@ -56,7 +56,7 @@ No account, no API key, no rate limit. The reading client is pure Python standar
 pip install ibd-rs-rating
 ```
 
-Requires Python 3.10 or newer.
+Requires Python 3.11 or newer.
 
 ## Quick start
 

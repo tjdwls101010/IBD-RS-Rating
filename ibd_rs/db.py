@@ -17,6 +17,13 @@ from .config import (
 logger = logging.getLogger(__name__)
 
 # --- Schema ---
+# NULL semantics for ``rs`` data columns (authoritative):
+# - close: NULL means never downloaded, explicitly cleared for repair/manual
+#   intervention by delete_ticker_prices, or pruned by prune_old_close from a
+#   rated row past the retention cutoff.
+# - rs_raw: NULL means never computed, insufficient history, or cleared.
+# - rs_rating: NULL means never computed, gate-failed for the day, too young,
+#   or cleared.
 
 SCHEMA_SQL_SQLITE = """
 CREATE TABLE IF NOT EXISTS rs (
@@ -62,6 +69,28 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+"""
+
+RLS_GRANT_SQL_PG = """
+ALTER TABLE rs ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS read_rs ON rs;
+CREATE POLICY read_rs ON rs FOR SELECT USING (true);
+
+ALTER TABLE tickers ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS read_tickers ON tickers;
+CREATE POLICY read_tickers ON tickers FOR SELECT USING (true);
+
+ALTER TABLE meta ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS read_meta ON meta;
+CREATE POLICY read_meta ON meta FOR SELECT USING (true);
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anonymous') THEN
+        GRANT SELECT ON rs, tickers, meta TO anonymous;
+    END IF;
+END
+$$;
 """
 
 
@@ -130,6 +159,7 @@ def init_db(conn):
     cur = _cursor(conn)
     if _conn_is_pg(conn):
         cur.execute(SCHEMA_SQL_PG)
+        cur.execute(RLS_GRANT_SQL_PG)
     else:
         conn.executescript(SCHEMA_SQL_SQLITE)
     conn.commit()
@@ -162,7 +192,7 @@ def upsert_prices(conn, records):
     logger.info("Upserted %d price records", len(records))
 
 
-def upsert_rs(conn, records):
+def upsert_rs(conn, records, *, commit=True):
     """Insert or update RS records. records: list of (ticker, date, rs_raw, rs_rating)."""
     if not records:
         return
@@ -183,11 +213,33 @@ def upsert_rs(conn, records):
             "rs_raw = excluded.rs_raw, rs_rating = excluded.rs_rating",
             records,
         )
-    conn.commit()
+    if commit:
+        conn.commit()
     logger.info("Upserted %d RS records", len(records))
 
 
-def clear_rs_for_dates(conn, dates):
+def update_rs_ratings(conn, records):
+    """Update only RS ratings. records: list of (ticker, date, rating)."""
+    if not records:
+        return
+
+    p = "%s" if _conn_is_pg(conn) else "?"
+    sql = (
+        f"UPDATE rs SET rs_rating = {p} "
+        f"WHERE ticker = {p} AND date = {p}"
+    )
+    batch_size = 5000
+    cur = _cursor(conn)
+    for i in range(0, len(records), batch_size):
+        batch = records[i : i + batch_size]
+        params = [(rating, ticker, date) for ticker, date, rating in batch]
+        cur.executemany(sql, params)
+    cur.close()
+    conn.commit()
+    logger.info("Updated %d RS ratings", len(records))
+
+
+def clear_rs_for_dates(conn, dates, *, commit=True):
     """Clear RS fields for dates that are about to be recalculated."""
     date_values = list(dates)
     if not date_values:
@@ -204,7 +256,8 @@ def clear_rs_for_dates(conn, dates):
             tuple(batch),
         )
     cur.close()
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def upsert_tickers(conn, records):
@@ -232,7 +285,7 @@ def upsert_tickers(conn, records):
     logger.info("Upserted %d ticker records", len(records))
 
 
-def set_meta(conn, key, value):
+def set_meta(conn, key, value, *, commit=True):
     cur = _cursor(conn)
     if _conn_is_pg(conn):
         cur.execute(
@@ -247,7 +300,8 @@ def set_meta(conn, key, value):
             (key, str(value)),
         )
     cur.close()
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def delete_ticker_prices(conn, ticker):
@@ -267,13 +321,14 @@ def prune_old_close(conn):
     p = "%s" if _conn_is_pg(conn) else "?"
     cur = _cursor(conn)
     cur.execute(
-        f"DELETE FROM rs WHERE date < {p} AND rs_rating IS NULL",
+        f"DELETE FROM rs WHERE date < {p} AND rs_raw IS NULL AND rs_rating IS NULL",
         (cutoff,),
     )
     deleted = cur.rowcount if cur.rowcount != -1 else 0
     cur.execute(
         f"UPDATE rs SET close = NULL "
-        f"WHERE date < {p} AND rs_rating IS NOT NULL AND close IS NOT NULL",
+        f"WHERE date < {p} AND close IS NOT NULL "
+        f"AND (rs_raw IS NOT NULL OR rs_rating IS NOT NULL)",
         (cutoff,),
     )
     cleared = cur.rowcount if cur.rowcount != -1 else 0
@@ -309,6 +364,55 @@ def get_prices_df(conn, tickers=None):
     return pivot
 
 
+def get_rs_raw_df(conn, start=None, end=None):
+    """Load stored RS Raw values as a wide DataFrame (dates x tickers)."""
+    conditions = ["rs_raw IS NOT NULL"]
+    params = []
+    p = "%s" if _conn_is_pg(conn) else "?"
+    if start is not None:
+        conditions.append(f"date >= {p}")
+        params.append(start)
+    if end is not None:
+        conditions.append(f"date <= {p}")
+        params.append(end)
+
+    query = (
+        "SELECT ticker, date, rs_raw FROM rs "
+        f"WHERE {' AND '.join(conditions)} ORDER BY date"
+    )
+    df = pd.read_sql_query(query, conn, params=tuple(params))
+    if df.empty:
+        return pd.DataFrame()
+
+    pivot = df.pivot(index="date", columns="ticker", values="rs_raw")
+    pivot.index = pd.to_datetime(pivot.index)
+    pivot.sort_index(inplace=True)
+    return pivot
+
+
+def get_stored_rs_raw_keys(conn, dates):
+    """Return stored (ticker, date) keys with non-NULL RS Raw on the given dates."""
+    date_values = list(dates)
+    if not date_values:
+        return set()
+
+    p = "%s" if _conn_is_pg(conn) else "?"
+    batch_size = 500
+    keys = set()
+    cur = _cursor(conn)
+    for i in range(0, len(date_values), batch_size):
+        batch = date_values[i : i + batch_size]
+        placeholders = ", ".join([p] * len(batch))
+        cur.execute(
+            f"SELECT ticker, date FROM rs "
+            f"WHERE rs_raw IS NOT NULL AND date IN ({placeholders})",
+            tuple(batch),
+        )
+        keys.update(cur.fetchall())
+    cur.close()
+    return keys
+
+
 def get_latest_price_date(conn):
     cur = _cursor(conn)
     cur.execute("SELECT MAX(date) FROM rs WHERE close IS NOT NULL")
@@ -325,6 +429,22 @@ def get_latest_rs_date(conn):
     return row[0] if row and row[0] else None
 
 
+def get_latest_rated_date(conn):
+    cur = _cursor(conn)
+    cur.execute("SELECT MAX(date) FROM rs WHERE rs_rating IS NOT NULL")
+    row = cur.fetchone()
+    cur.close()
+    return row[0] if row and row[0] else None
+
+
+def get_oldest_rs_date(conn):
+    cur = _cursor(conn)
+    cur.execute("SELECT MIN(date) FROM rs WHERE rs_raw IS NOT NULL")
+    row = cur.fetchone()
+    cur.close()
+    return row[0] if row and row[0] else None
+
+
 def classify_latest_trading_day_completeness(
     *,
     latest_date,
@@ -333,7 +453,9 @@ def classify_latest_trading_day_completeness(
     rating_coverage,
     threshold=PRICE_COMPLETENESS_THRESHOLD,
 ):
-    """Classify whether latest trading day close coverage is complete enough."""
+    """Classify whether the latest trading day is complete: BOTH close and
+    rating coverage must clear the threshold, with distinct failure reasons
+    ('close_coverage_below_threshold' vs 'rating_coverage_below_threshold')."""
     universe_size = int(universe_size or 0)
     close_coverage = int(close_coverage or 0)
     rating_coverage = int(rating_coverage or 0)
@@ -370,7 +492,16 @@ def classify_latest_trading_day_completeness(
         }
 
     coverage_ratio = close_coverage / universe_size
-    is_complete = coverage_ratio >= threshold
+    rating_ratio = rating_coverage / universe_size
+    close_ok = coverage_ratio >= threshold
+    rating_ok = rating_ratio >= threshold
+    is_complete = close_ok and rating_ok
+    if is_complete:
+        reason = "complete"
+    elif not close_ok:
+        reason = "close_coverage_below_threshold"
+    else:
+        reason = "rating_coverage_below_threshold"
     return {
         "latest_date": latest_date,
         "universe_size": universe_size,
@@ -381,8 +512,18 @@ def classify_latest_trading_day_completeness(
         "coverage_ratio": coverage_ratio,
         "threshold": threshold,
         "is_complete": is_complete,
-        "reason": "complete" if is_complete else "close_coverage_below_threshold",
+        "reason": reason,
     }
+
+
+def get_active_universe(conn, universe_tickers=None):
+    """Return the validated active universe as a set.
+
+    Defaults to the cached ticker_list membership (empty set if none cached).
+    Shared by the RS rating gate and the completeness watchdog so both size
+    their denominator against the same population.
+    """
+    return _normalize_universe_tickers(conn, universe_tickers)
 
 
 def _normalize_universe_tickers(conn, universe_tickers):

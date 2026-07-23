@@ -5,7 +5,11 @@ on:
     types: [published]  # GitHub에서 Release 생성 시 자동 배포
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml  # never ship without a green test job
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
 
     steps:
@@ -18,7 +22,17 @@ jobs:
       - name: Install build tools
         run: pip install build twine
 
-      - name: Build package
+      - name: Assert release tag matches package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")"
+          echo "release tag: ${GITHUB_REF_NAME} (normalized: ${TAG}) | pyproject version: ${VERSION}"
+          if [ "${TAG}" != "${VERSION}" ]; then
+            echo "::error::release tag ${GITHUB_REF_NAME} does not match pyproject version ${VERSION}"
+            exit 1
+          fi
+
+      - name: Build package (smoke)
         run: python -m build
 
       - name: Publish to PyPI

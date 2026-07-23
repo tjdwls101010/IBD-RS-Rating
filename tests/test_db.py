@@ -1,8 +1,12 @@
 """Tests for database operations."""
 
+import struct
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
+
+import pandas as pd
 from ibd_rs import db
 from ibd_rs.config import PRICE_RETENTION_MONTHS
 
@@ -67,6 +71,77 @@ def test_init_db_idempotent(conn):
     db.init_db(conn)
 
 
+def test_init_db_pg_schema_includes_idempotent_rls_and_migration_parity():
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql):
+            executed.append(sql)
+
+        def close(self):
+            pass
+
+    class FakePgConnection:
+        def __init__(self):
+            self.committed = False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            self.committed = True
+
+    conn = FakePgConnection()
+    db.init_db(conn)
+
+    schema_sql = " ".join(db.SCHEMA_SQL_PG.split())
+    rls_sql = " ".join(db.RLS_GRANT_SQL_PG.split())
+    for table in ("rs", "tickers", "meta"):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in schema_sql
+        assert f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;" in rls_sql
+        assert f"DROP POLICY IF EXISTS read_{table} ON {table};" in rls_sql
+        assert (
+            f"CREATE POLICY read_{table} ON {table} FOR SELECT USING (true);"
+            in rls_sql
+        )
+
+    guarded_grant = (
+        "IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anonymous') THEN "
+        "GRANT SELECT ON rs, tickers, meta TO anonymous; "
+        "END IF;"
+    )
+    assert guarded_grant in rls_sql
+    assert executed == [db.SCHEMA_SQL_PG, db.RLS_GRANT_SQL_PG]
+    assert conn.committed
+
+    migration_path = (
+        Path(__file__).resolve().parents[1] / "migrations" / "0001_rls_grant.sql"
+    )
+    expected_migration = (
+        db.SCHEMA_SQL_PG + db.RLS_GRANT_SQL_PG
+    ).encode().removeprefix(b"\n")
+    assert migration_path.read_bytes() == expected_migration
+
+
+def test_init_db_sqlite_does_not_execute_postgresql_rls():
+    sqlite_conn = db.get_connection(":memory:")
+    statements = []
+    sqlite_conn.set_trace_callback(statements.append)
+    try:
+        db.init_db(sqlite_conn)
+        tables = {
+            row[0]
+            for row in sqlite_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    finally:
+        sqlite_conn.close()
+
+    assert {"rs", "tickers", "meta"} <= tables
+    assert not any("ROW LEVEL SECURITY" in statement for statement in statements)
+
+
 def test_upsert_prices(conn):
     records = [
         ("AAPL", "2026-01-01", 150.0),
@@ -101,6 +176,61 @@ def test_upsert_rs(conn):
     assert count == 2
 
 
+def test_clear_rs_for_dates_commit_false_leaves_uncommitted(conn):
+    date = "2026-01-01"
+    db.upsert_rs(conn, [("AAPL", date, 0.345, 72)])
+    before = conn.execute(
+        "SELECT rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
+        ("AAPL", date),
+    ).fetchone()
+
+    db.clear_rs_for_dates(conn, [date], commit=False)
+
+    assert conn.execute(
+        "SELECT rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
+        ("AAPL", date),
+    ).fetchone() == (None, None)
+
+    conn.rollback()
+    assert conn.execute(
+        "SELECT rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
+        ("AAPL", date),
+    ).fetchone() == before
+
+
+
+def test_update_rs_ratings_writes_only_rs_rating(conn):
+    date = "2026-01-02"
+    close = 123.456789012345
+    rs_raw = 0.123456789012345
+    db.upsert_prices(conn, [("AAPL", date, close)])
+    db.upsert_rs(conn, [("AAPL", date, rs_raw, 41)])
+
+    before = conn.execute(
+        "SELECT close, rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
+        ("AAPL", date),
+    ).fetchone()
+    immutable_bytes = tuple(struct.pack("!d", value) for value in before[:2])
+
+    db.update_rs_ratings(
+        conn,
+        [
+            ("AAPL", date, 87),
+            ("MISSING", "2026-01-03", 99),
+        ],
+    )
+
+    after = conn.execute(
+        "SELECT close, rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
+        ("AAPL", date),
+    ).fetchone()
+    assert tuple(struct.pack("!d", value) for value in after[:2]) == immutable_bytes
+    assert after[2] == 87
+    assert conn.execute(
+        "SELECT COUNT(*) FROM rs WHERE ticker = ? AND date = ?",
+        ("MISSING", "2026-01-03"),
+    ).fetchone()[0] == 0
+
 def test_upsert_tickers(conn):
     records = [
         ("AAPL", "Technology", "Consumer Electronics"),
@@ -129,12 +259,80 @@ def test_get_prices_df(conn):
     assert "NVDA" in df.columns
 
 
+
+def test_get_rs_raw_df_pivots_stored_rs_raw(conn):
+    db.upsert_rs(
+        conn,
+        [
+            ("NVDA", "2026-01-02", 0.4, 90),
+            ("AAPL", "2026-01-01", 0.1, 40),
+            ("NVDA", "2026-01-01", 0.3, 80),
+            ("AAPL", "2026-01-02", 0.2, 60),
+            ("SPY", "2026-01-03", 0.5, 70),
+        ],
+    )
+    db.upsert_prices(conn, [("CLOSE_ONLY", "2026-01-01", 10.0)])
+
+    raw_df = db.get_rs_raw_df(conn)
+    assert list(raw_df.index) == list(pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03"]))
+    assert list(raw_df.columns) == ["AAPL", "NVDA", "SPY"]
+    assert raw_df.at[pd.Timestamp("2026-01-01"), "AAPL"] == 0.1
+    assert raw_df.at[pd.Timestamp("2026-01-02"), "NVDA"] == 0.4
+    assert all(pd.api.types.is_float_dtype(dtype) for dtype in raw_df.dtypes)
+
+    bounded = db.get_rs_raw_df(conn, start="2026-01-02", end="2026-01-02")
+    assert list(bounded.index) == [pd.Timestamp("2026-01-02")]
+    assert list(bounded.columns) == ["AAPL", "NVDA"]
+
+
+def test_get_stored_rs_raw_keys(conn):
+    dates = list(pd.date_range("2024-01-01", periods=503).strftime("%Y-%m-%d"))
+    db.upsert_rs(
+        conn,
+        [("AAPL", date, float(i), 50) for i, date in enumerate(dates)]
+        + [("NVDA", dates[0], 0.25, 75)]
+        + [("OUTSIDE", "2026-01-01", 0.5, 90)]
+        + [("NULL_RAW", dates[1], None, 80)],
+    )
+
+    keys = db.get_stored_rs_raw_keys(conn, (date for date in dates))
+
+    assert keys == {("AAPL", date) for date in dates} | {("NVDA", dates[0])}
+    assert db.get_stored_rs_raw_keys(conn, []) == set()
+
 def test_get_latest_price_date(conn):
     assert db.get_latest_price_date(conn) is None
     db.upsert_prices(conn, [("AAPL", "2026-01-01", 150.0), ("AAPL", "2026-03-01", 160.0)])
     assert db.get_latest_price_date(conn) == "2026-03-01"
 
 
+def test_get_latest_rated_date(conn):
+    db.upsert_rs(
+        conn,
+        [
+            ("RATED", "2026-07-18", 0.5, 91),
+            ("OUTAGE", "2026-07-22", 0.6, None),
+        ],
+    )
+
+    assert db.get_latest_rated_date(conn) == "2026-07-18"
+    assert db.get_latest_rs_date(conn) == "2026-07-22"
+    assert db.get_latest_rated_date(conn) != db.get_latest_rs_date(conn)
+
+
+def test_get_oldest_rs_date(conn):
+    assert db.get_oldest_rs_date(conn) is None
+
+    db.upsert_prices(conn, [("PRICE_ONLY", "2025-01-01", 10.0)])
+    db.upsert_rs(
+        conn,
+        [
+            ("AAPL", "2026-03-01", 0.3, 70),
+            ("NVDA", "2026-01-01", 0.2, 60),
+        ],
+    )
+
+    assert db.get_oldest_rs_date(conn) == "2026-01-01"
 def test_check_latest_trading_day_completeness_detects_stalled_database(conn):
     universe = [f"T{i}" for i in range(10)]
     db.upsert_prices(
@@ -169,14 +367,14 @@ def test_classify_latest_trading_day_completeness_threshold_boundary():
         latest_date="2026-05-22",
         universe_size=100,
         close_coverage=89,
-        rating_coverage=0,
+        rating_coverage=90,
         threshold=0.90,
     )
     passed = db.classify_latest_trading_day_completeness(
         latest_date="2026-05-22",
         universe_size=100,
         close_coverage=90,
-        rating_coverage=0,
+        rating_coverage=90,
         threshold=0.90,
     )
 
@@ -184,6 +382,45 @@ def test_classify_latest_trading_day_completeness_threshold_boundary():
     assert failed["missing_close_count"] == 11
     assert passed["is_complete"] is True
     assert passed["missing_close_count"] == 10
+
+
+def test_classify_gates_on_rating_coverage_boundary():
+    """BUG3 regression: with close coverage satisfied, rating coverage below
+    the threshold must FAIL, with a distinct reason. The 3-week silent outage
+    had ~98% close coverage while the ratings were NULL."""
+    failed = db.classify_latest_trading_day_completeness(
+        latest_date="2026-06-30",
+        universe_size=100,
+        close_coverage=98,
+        rating_coverage=89,
+        threshold=0.90,
+    )
+    passed = db.classify_latest_trading_day_completeness(
+        latest_date="2026-06-30",
+        universe_size=100,
+        close_coverage=98,
+        rating_coverage=90,
+        threshold=0.90,
+    )
+
+    assert failed["is_complete"] is False
+    assert failed["reason"] == "rating_coverage_below_threshold"
+    assert passed["is_complete"] is True
+    assert passed["reason"] == "complete"
+
+
+def test_classify_zero_rating_coverage_fails_even_with_full_close():
+    """The exact silent-outage shape: full close coverage, zero ratings."""
+    report = db.classify_latest_trading_day_completeness(
+        latest_date="2026-06-30",
+        universe_size=100,
+        close_coverage=100,
+        rating_coverage=0,
+        threshold=0.90,
+    )
+
+    assert report["is_complete"] is False
+    assert report["reason"] == "rating_coverage_below_threshold"
 
 
 def test_check_latest_trading_day_completeness_fails_without_price_data(conn):
@@ -335,3 +572,27 @@ def test_prune_old_close_keeps_cutoff_boundary_and_is_idempotent(conn, monkeypat
         ("AAPL", cutoff, 150.0),
         ("AAPL", recent_date, 160.0),
     ]
+
+
+def test_prune_old_close_keeps_unrated_rs_raw_for_recovery(conn, monkeypatch):
+    """An outage leaves rs_raw stored but rs_rating NULL. Retention must NOT
+    delete those rows (they must stay re-rankable via backfill); it only nulls
+    their old close. This is the recovery-deadline fix (D8)."""
+    cutoff = _set_retention_now(monkeypatch)
+    old_date = _offset_date(cutoff, -1)
+    conn.execute(
+        "INSERT INTO rs (ticker, date, close, rs_raw, rs_rating) VALUES (?, ?, ?, ?, ?)",
+        ("OUT", old_date, 12.5, 0.42, None),
+    )
+    conn.commit()
+
+    db.prune_old_close(conn)
+
+    row = conn.execute(
+        "SELECT close, rs_raw, rs_rating FROM rs WHERE ticker = ? AND date = ?",
+        ("OUT", old_date),
+    ).fetchone()
+    assert row is not None      # survives: rs_raw is not deleted past cutoff
+    assert row[1] == 0.42       # rs_raw intact -> still re-rankable
+    assert row[0] is None       # old close nulled by retention
+    assert row[2] is None
