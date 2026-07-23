@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+from datetime import datetime
 
 from .config import DATA_DIR, UNIVERSE_FLOOR
 from . import db
@@ -24,9 +25,17 @@ def cmd_init(args):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.get_connection()
     db.init_db(conn)
+    if db.get_oldest_rs_date(conn) is not None and not getattr(args, "force_full", False):
+        print(
+            "Refusing init: database already has RS history; pass --force-full to "
+            "rebuild from scratch (only safe with full price history), or use "
+            "`recalc --from/--to` to fix ratings."
+        )
+        conn.close()
+        raise SystemExit(1)
 
     print("Step 1/4: Fetching ticker list from Finviz...")
-    universe, conn = tickers_mod.fetch_ticker_list(conn, force_refresh=True)
+    universe, conn = tickers_mod.refresh_universe(conn)
     print(f"  Found {len(universe.tickers)} tickers")
     if not universe.trusted:
         print(f"  ERROR: {universe.reason}")
@@ -50,7 +59,12 @@ def cmd_init(args):
         print("  No anomalies detected")
 
     print("Step 4/4: Calculating RS ratings...")
-    count = rs.calculate_and_store(conn, recalc_all=True)
+    count = rs.calculate_and_store(
+        conn,
+        recalc_all=True,
+        active_universe=ticker_list,
+        force_full=args.force_full,
+    )
     print(f"  Computed {count} RS records")
 
     conn.close()
@@ -100,14 +114,15 @@ def cmd_update(args):
     conn = db.get_connection()
     db.init_db(conn)
 
-    print("Step 1/6: Fetching ticker list...")
-    universe, conn = tickers_mod.fetch_ticker_list(conn)
+    print("Step 1/6: Loading cached ticker list...")
+    universe, conn = tickers_mod.get_cached_universe(conn)
     ticker_list = universe.tickers
     print(f"  {len(ticker_list)} tickers")
     if not universe.trusted:
         print(f"  WARNING: universe fetch degraded: {universe.reason}")
 
     print("Step 2/6: Downloading new price data...")
+    conn = db.reconnect(conn)
     failed = prices.download_update(ticker_list, conn)
     if failed:
         print(f"  Warning: {len(failed)} tickers failed")
@@ -121,7 +136,8 @@ def cmd_update(args):
         print("  No anomalies detected")
 
     print("Step 4/6: Calculating RS ratings...")
-    count = rs.calculate_and_store(conn, recalc_all=False)
+    conn = db.reconnect(conn)
+    count = rs.calculate_and_store(conn, recalc_all=False, active_universe=ticker_list)
     print(f"  Computed {count} RS records")
 
     print("Step 5/6: Pruning old close prices...")
@@ -140,17 +156,71 @@ def cmd_update(args):
     print("\nUpdate complete!")
 
 
-def cmd_recalc(args):
+def cmd_refresh_universe(args):
     conn = db.get_connection()
-    print("Recalculating all RS ratings...")
-    count = rs.calculate_and_store(conn, recalc_all=True)
-    print(f"Computed {count} RS records")
+    db.init_db(conn)
+
+    universe, conn = tickers_mod.refresh_universe(conn)
+    print(f"Universe: {len(universe.tickers)} tickers (trusted={universe.trusted})")
+    if not universe.trusted:
+        print(f"  ERROR: {universe.reason}")
+
     conn.close()
+    if not universe.trusted:
+        raise SystemExit(1)
+
+
+def cmd_recalc(args):
+    from_date = args.from_date
+    to_date = args.to_date
+    force_full = args.force_full
+    conn = db.get_connection()
+    try:
+        if force_full and (from_date or to_date):
+            print("ERROR: --from/--to and --force-full are mutually exclusive.")
+            raise SystemExit(1)
+
+        if from_date or to_date:
+            if not from_date or not to_date:
+                print("ERROR: --from and --to must be provided together.")
+                raise SystemExit(1)
+            try:
+                parsed_from = datetime.strptime(from_date, "%Y-%m-%d")
+                parsed_to = datetime.strptime(to_date, "%Y-%m-%d")
+            except (TypeError, ValueError):
+                print("ERROR: --from and --to must be valid dates in YYYY-MM-DD format.")
+                raise SystemExit(1)
+            if parsed_from > parsed_to:
+                print("ERROR: --from date must be on or before --to date.")
+                raise SystemExit(1)
+
+            print(f"Backfilling RS ratings from {from_date} to {to_date}...")
+            count = rs.backfill_ratings(conn, from_date, to_date)
+            if count == 0:
+                print("No stored rs_raw in [from,to] to re-rank.")
+                raise SystemExit(1)
+            print(f"Updated {count} RS rating records")
+        elif force_full:
+            print("Recalculating all RS ratings...")
+            count = rs.calculate_and_store(
+                conn,
+                recalc_all=True,
+                force_full=True,
+            )
+            print(f"Computed {count} RS records")
+        else:
+            print(
+                "ERROR: choose safe rating-only `recalc --from <date> --to <date>` "
+                "or guarded `recalc --force-full`."
+            )
+            raise SystemExit(1)
+    finally:
+        conn.close()
 
 
 def cmd_top(args):
     conn = db.get_connection()
-    latest_date = db.get_latest_rs_date(conn)
+    latest_date = db.get_latest_rated_date(conn)
     if not latest_date:
         print("No RS data available. Run 'init' first.")
         conn.close()
@@ -221,7 +291,7 @@ def cmd_status(args):
 def cmd_export(args):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.get_connection()
-    latest_date = db.get_latest_rs_date(conn)
+    latest_date = db.get_latest_rated_date(conn)
     if not latest_date:
         print("No RS data available.")
         conn.close()
@@ -248,9 +318,27 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose output")
     subparsers = parser.add_subparsers(dest="command", help="command")
 
-    subparsers.add_parser("init", help="Initial setup: download data and compute RS")
+    p_init = subparsers.add_parser("init", help="Initial setup: download data and compute RS")
+    p_init.add_argument(
+        "--force-full",
+        dest="force_full",
+        action="store_true",
+        help="allow a guarded full RS recompute",
+    )
     subparsers.add_parser("update", help="Daily update: new prices + RS recalc")
-    subparsers.add_parser("recalc", help="Recalculate RS from existing prices")
+    subparsers.add_parser(
+        "refresh-universe",
+        help="Refresh the validated weekly Finviz universe cache",
+    )
+    p_recalc = subparsers.add_parser("recalc", help="Recalculate RS from existing prices")
+    p_recalc.add_argument("--from", dest="from_date", help="first date to re-rank (YYYY-MM-DD)")
+    p_recalc.add_argument("--to", dest="to_date", help="last date to re-rank (YYYY-MM-DD)")
+    p_recalc.add_argument(
+        "--force-full",
+        dest="force_full",
+        action="store_true",
+        help="allow a guarded full RS recompute",
+    )
 
     p_top = subparsers.add_parser("top", help="Show top stocks by RS Rating")
     p_top.add_argument("n", nargs="?", type=int, default=20, help="number of stocks (default: 20)")
@@ -266,8 +354,14 @@ def main():
     setup_logging(args.verbose)
 
     commands = {
-        "init": cmd_init, "update": cmd_update, "recalc": cmd_recalc,
-        "top": cmd_top, "lookup": cmd_lookup, "status": cmd_status, "export": cmd_export,
+        "init": cmd_init,
+        "update": cmd_update,
+        "refresh-universe": cmd_refresh_universe,
+        "recalc": cmd_recalc,
+        "top": cmd_top,
+        "lookup": cmd_lookup,
+        "status": cmd_status,
+        "export": cmd_export,
     }
 
     if args.command in commands:

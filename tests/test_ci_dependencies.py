@@ -65,3 +65,33 @@ def test_distribution_dependencies_stay_loose():
     assert "finvizfinance>=1.3.0" in optional["engine"]
     assert "psycopg2-binary>=2.9" in optional["pg"]
     assert all("==" not in dependency for dependency in engine_and_pg)
+
+def test_reusable_test_workflow_runs_pytest_on_locked_deps():
+    test_wf = (WORKFLOW_DIR / "test.yml").read_text(encoding="utf-8")
+
+    assert "workflow_call" in test_wf
+    assert "pytest" in test_wf
+    assert "requirements.lock" in test_wf
+    # matrix must exercise the requires-python floor (3.11) and a current interpreter
+    assert "3.11" in test_wf
+    assert "3.12" in test_wf
+
+
+def test_ci_workflow_runs_tests_on_push_and_pull_request():
+    ci = (WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8")
+
+    assert "push" in ci
+    assert "pull_request" in ci
+    # CI delegates to the shared test workflow rather than duplicating it
+    assert "./.github/workflows/test.yml" in ci
+
+
+def test_publish_is_gated_on_a_green_test_job_and_version_match():
+    publish = (WORKFLOW_DIR / "publish.yml").read_text(encoding="utf-8")
+
+    # publish job cannot run without a passing test job (the shared workflow)
+    assert "needs: test" in publish
+    assert "./.github/workflows/test.yml" in publish
+    # build smoke and a release-tag == pyproject-version assertion
+    assert "python -m build" in publish
+    assert "GITHUB_REF_NAME" in publish

@@ -10,11 +10,13 @@ memory, and transparently refreshes it before it expires (tokens are valid
 for 1 hour).
 """
 
+from datetime import date
 import json
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 
 # Refresh the cached token this many seconds before its actual expiry, to
 # avoid racing a request against an expiry that lands mid-flight.
@@ -303,6 +305,35 @@ class RS:
         if not first or not last:
             return {"first": None, "last": None}
         return {"first": first[0]["date"], "last": last[0]["date"]}
+
+    def staleness(self):
+        """Report whether the latest ratings lag the latest close data."""
+        rated = self._latest_date()
+        latest_close = self._request("rs", {
+            "select": "date",
+            "close": "not.is.null",
+            "order": "date.desc",
+            "limit": "1",
+        })
+        close = latest_close[0]["date"] if latest_close else None
+
+        both_dates_exist = rated is not None and close is not None
+        is_stale = both_dates_exist and rated < close
+        if is_stale:
+            lag_days = (date.fromisoformat(close) - date.fromisoformat(rated)).days
+            warnings.warn(
+                f"RS ratings are stale: latest rated {rated} lags latest close {close}",
+                stacklevel=2,
+            )
+        else:
+            lag_days = 0 if both_dates_exist else None
+
+        return {
+            "latest_rated_date": rated,
+            "latest_close_date": close,
+            "is_stale": is_stale,
+            "lag_days": lag_days,
+        }
 
     # ------------------------------------------------------------------
     # Sector / Industry analysis

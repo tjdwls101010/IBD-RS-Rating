@@ -1,12 +1,14 @@
-name: Initial Data Load
+name: Weekly Finviz Universe Refresh
 
 on:
-  workflow_dispatch:  # manual trigger only
+  schedule:
+    - cron: '0 8 * * 0'
+  workflow_dispatch:
 
 jobs:
-  init:
+  refresh-universe:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -22,12 +24,7 @@ jobs:
           python -m pip install -r requirements.lock
           python -m pip install --no-deps .
 
-      - name: Run initial data load
+      - name: Refresh Finviz universe
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python -m ibd_rs init --force-full
-
-      - name: Print status
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python -m ibd_rs status
+        run: python -m ibd_rs refresh-universe

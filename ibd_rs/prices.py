@@ -100,6 +100,36 @@ def _tickers_with_close_data(close_df):
     return returned
 
 
+def _stale_tickers(close_df):
+    """Return tickers whose newest close predates the frame's latest session."""
+    if close_df.empty:
+        return {}
+
+    latest_session = close_df.index.max()
+    stale = {}
+    for ticker in close_df.columns:
+        values = close_df[ticker]
+        if isinstance(values, pd.DataFrame):
+            has_close_by_session = values.notna().any(axis=1)
+        else:
+            has_close_by_session = values.notna()
+
+        close_dates = close_df.index[has_close_by_session.to_numpy()]
+        if close_dates.empty:
+            continue
+
+        newest_close = close_dates.max()
+        if newest_close < latest_session:
+            newest_label = pd.Timestamp(newest_close).strftime("%Y-%m-%d")
+            latest_label = pd.Timestamp(latest_session).strftime("%Y-%m-%d")
+            stale[ticker] = (
+                f"stale: newest close {newest_label} "
+                f"before latest session {latest_label}"
+            )
+
+    return stale
+
+
 def _missing_tickers(requested_tickers, close_df):
     returned_tickers = _tickers_with_close_data(close_df)
     return [ticker for ticker in requested_tickers if ticker not in returned_tickers]
@@ -169,7 +199,7 @@ def download_initial(tickers, conn):
 
     if all_failed:
         logger.warning("Total failed tickers: %d", len(all_failed))
-        db.set_meta(conn, "failed_tickers", ",".join(all_failed.keys()))
+    db.set_meta(conn, "failed_tickers", ",".join(all_failed.keys()))
 
     return all_failed
 
@@ -203,11 +233,21 @@ def download_update(tickers, conn):
         if missing:
             logger.warning("Update batch %d missing data for %d tickers", batch_num, len(missing))
 
+        stale = _stale_tickers(close_df)
+        for ticker, reason in stale.items():
+            if ticker not in all_failed:
+                all_failed[ticker] = reason
+        if stale:
+            logger.warning(
+                "Update batch %d has stale data for %d tickers",
+                batch_num,
+                len(stale),
+            )
+
         _store_batch(conn, batch, close_df, all_failed, batch_num, "Update")
 
         time.sleep(INTER_BATCH_SLEEP_SECONDS)
 
-    if all_failed:
-        db.set_meta(conn, "failed_tickers", ",".join(all_failed.keys()))
+    db.set_meta(conn, "failed_tickers", ",".join(all_failed.keys()))
     db.set_meta(conn, "last_update_date", today)
     return all_failed

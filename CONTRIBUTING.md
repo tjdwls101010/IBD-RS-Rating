@@ -38,7 +38,7 @@ The extras map to the two halves of the project:
 | `pg` | psycopg2-binary | Running the engine against Postgres |
 | `dev` | pytest, build, twine | Tests and packaging |
 
-Python 3.10 or newer. CI runs on 3.12.
+Python 3.11 or newer. CI runs on 3.11 and 3.12.
 
 ## Running tests
 

@@ -5,6 +5,7 @@ All HTTP calls are mocked so the test suite runs offline and fast.
 
 import json
 import time
+import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -338,6 +339,56 @@ def test_dates_empty(mock_urlopen):
 
 
 @patch("urllib.request.urlopen")
+def test_staleness_warns_when_ratings_lag_closes(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-07-18"}]),
+        mock_response([{"date": "2026-07-22"}]),
+    ]
+
+    with pytest.warns(
+        UserWarning,
+        match=(
+            "RS ratings are stale: latest rated 2026-07-18 "
+            "lags latest close 2026-07-22"
+        ),
+    ):
+        result = RS().staleness()
+
+    assert result == {
+        "latest_rated_date": "2026-07-18",
+        "latest_close_date": "2026-07-22",
+        "is_stale": True,
+        "lag_days": 4,
+    }
+    rated_url, close_url = [
+        call.args[0].full_url for call in mock_urlopen.call_args_list
+    ]
+    assert "rs_rating=not.is.null" in rated_url
+    assert "close=not.is.null" in close_url
+
+
+@patch("urllib.request.urlopen")
+def test_staleness_not_stale_when_current(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-07-22"}]),
+        mock_response([{"date": "2026-07-22"}]),
+    ]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = RS().staleness()
+
+    assert result == {
+        "latest_rated_date": "2026-07-22",
+        "latest_close_date": "2026-07-22",
+        "is_stale": False,
+        "lag_days": 0,
+    }
+    assert caught == []
+
+
+
+@patch("urllib.request.urlopen")
 def test_sectors(mock_urlopen):
     mock_urlopen.return_value = mock_response([
         {"sector": "Technology"},
@@ -412,9 +463,90 @@ def test_industry_top(mock_urlopen):
     assert len(result) == 2
 
 
-def test_version():
+@patch("urllib.request.urlopen")
+def test_sectors_empty_tickers_table_returns_empty(mock_urlopen):
+    mock_urlopen.return_value = mock_response([])
+    assert RS().sectors() == []
+
+
+@patch("urllib.request.urlopen")
+def test_industries_empty_tickers_table_returns_empty(mock_urlopen):
+    mock_urlopen.return_value = mock_response([])
+    assert RS().industries() == []
+
+
+@patch("urllib.request.urlopen")
+def test_sector_ranking_degrades_when_tickers_table_empty(mock_urlopen):
+    # Ratings exist but the tickers table carries no sector mapping (the exact
+    # state right after Finviz is demoted / before the weekly enrichment runs).
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-03-19"}]),          # _latest_date
+        mock_response([{"ticker": "NVDA", "rs_rating": 90}]),  # rs ratings
+        mock_response([]),                                 # tickers info (empty)
+    ]
+    assert RS().sector_ranking() == []  # sensible empty, not a crash
+
+
+@patch("urllib.request.urlopen")
+def test_sector_ranking_partial_sector_data_returns_partial(mock_urlopen):
+    # Only some rated tickers carry a sector; the ranking aggregates just those.
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-03-19"}]),
+        mock_response([
+            {"ticker": "NVDA", "rs_rating": 90},
+            {"ticker": "AAPL", "rs_rating": 70},
+            {"ticker": "GHOST", "rs_rating": 50},  # no sector row -> excluded
+        ]),
+        mock_response([
+            {"ticker": "NVDA", "sector": "Technology"},
+            {"ticker": "AAPL", "sector": "Technology"},
+        ]),
+    ]
+    result = RS().sector_ranking()
+    assert result == [{"sector": "Technology", "avg_rs": 80.0, "count": 2}]
+
+
+@patch("urllib.request.urlopen")
+def test_industry_ranking_degrades_when_tickers_table_empty(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-03-19"}]),
+        mock_response([{"ticker": "NVDA", "rs_rating": 90}]),
+        mock_response([]),
+    ]
+    assert RS().industry_ranking() == []
+
+
+@patch("urllib.request.urlopen")
+def test_sector_top_unknown_sector_returns_empty(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-03-19"}]),
+        mock_response([]),  # no tickers in this sector
+    ]
+    assert RS().sector_top("Nonexistent") == []
+
+
+@patch("urllib.request.urlopen")
+def test_industry_top_unknown_industry_returns_empty(mock_urlopen):
+    mock_urlopen.side_effect = [
+        mock_response([{"date": "2026-03-19"}]),
+        mock_response([]),
+    ]
+    assert RS().industry_top("Nonexistent") == []
+
+
+def test_version_matches_pyproject_across_packages():
+    import tomllib
+    from pathlib import Path
+    import ibd_rs
     import rs_rating
-    assert rs_rating.__version__ == "0.4.0"
+
+    pyproject = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    expected = pyproject["project"]["version"]
+
+    assert rs_rating.__version__ == expected
+    assert ibd_rs.__version__ == expected
 
 
 # ------------------------------------------------------------------
